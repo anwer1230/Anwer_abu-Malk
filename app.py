@@ -1070,7 +1070,7 @@ def is_arabic_keyword_in_text(keyword: str, text: str) -> bool:
         return False
     padded_kw = f" {norm_kw} "
     padded_text = f" {norm_text} "
-    return padded_kw in padded_text
+    return (padded_kw in padded_text) or (norm_kw == norm_text) or (len(norm_kw) >= 3 and norm_kw in norm_text)
 
 # ── الكلمات المراقبة الافتراضية والدائمة (المستخرجة نصاً من الصور) ──────
 DEFAULT_MONITORING_KEYWORDS_TEXT = """اريد مساعدة
@@ -2692,7 +2692,8 @@ class TelegramClientManager:
             if matched:
                 combined_kw = ' | '.join(matched)
                 logger.info(f"🔑 [{self.user_id}] {len(matched)} كلمة مطابقة: '{combined_kw}' في {group_identifier}")
-                await self._trigger_keyword_alert(message, combined_kw, group_identifier, group_link, event)
+                # تشغيل تنبيه الكلمة وإرساله للرسائل المحفوظة في الخلفية لضمان عدم تأخير الرد التلقائي
+                asyncio.create_task(self._trigger_keyword_alert(message, combined_kw, group_identifier, group_link, event))
                 try:
                     await self._handle_keyword_auto_reply(event, message, matched, group_identifier)
                 except Exception as _kar_err:
@@ -2740,7 +2741,12 @@ class TelegramClientManager:
 
                 if not sender_username and sender_id:
                     try:
-                        sender_ent = await self.client.get_entity(sender_id)
+                        input_sender = None
+                        try:
+                            input_sender = await event.get_input_sender()
+                        except Exception:
+                            pass
+                        sender_ent = await self.client.get_entity(input_sender or sender_id)
                         if sender_ent:
                             if not sender:
                                 sender = sender_ent
@@ -2751,8 +2757,8 @@ class TelegramClientManager:
                                 sender_name = f"{sender_first} {sender_last}".strip().lower()
                             if not sender_phone:
                                 sender_phone = str(getattr(sender_ent, 'phone', '') or '').strip().lstrip('+')
-                    except Exception:
-                        pass
+                    except Exception as _snd_res_err:
+                        logger.debug(f"Sender resolve debug: {_snd_res_err}")
 
                 sender_id_str = str(sender_id) if sender_id is not None else ''
 
@@ -2971,18 +2977,28 @@ class TelegramClientManager:
                     elif match_mode == 'regex':
                         matched = bool(re.search(keyword, text, re.IGNORECASE))
                     else:
-                        matched = (keyword.lower() in text_lower)
+                        matched = (keyword.lower() in text_lower) or is_arabic_keyword_in_text(keyword, text)
                 except re.error as rerr:
                     logger.warning(f"Auto-reply regex error in rule #{idx} ({keyword}): {rerr}")
                     continue
 
                 if matched:
+                    sent_ok = False
                     try:
-                        await self.client.send_message(
-                            entity=event.chat_id,
-                            message=reply_text,
-                            reply_to=message.id
-                        )
+                        await event.reply(reply_text)
+                        sent_ok = True
+                    except Exception as rep_err:
+                        try:
+                            await self.client.send_message(
+                                entity=event.chat_id,
+                                message=reply_text,
+                                reply_to=message.id
+                            )
+                            sent_ok = True
+                        except Exception as send_err:
+                            logger.error(f"❌ Failed to send auto-reply for '{keyword[:30]}': {send_err}")
+
+                    if sent_ok:
                         logger.info(f"✅ Auto-reply sent for keyword '{keyword[:40]}' in {group_identifier} (user={self.user_id})")
                         try:
                             _emit_log_update('INFO',
@@ -3004,8 +3020,6 @@ class TelegramClientManager:
                         except Exception:
                             pass
                         break
-                    except Exception as send_err:
-                        logger.error(f"❌ Failed to send auto-reply for '{keyword[:30]}': {send_err}", exc_info=True)
         except Exception as e:
             logger.error(f"Auto-reply handler error: {e}")
 
@@ -3222,11 +3236,12 @@ class TelegramClientManager:
                 return
 
             sent_reply = False
+            is_priv = bool(getattr(event, 'is_private', False))
 
             # ──────────────────────────────────────────────────────────
-            # 1) الرد التلقائي المباشر في المجموعة على رسالة العميل (عبر event.reply الموثوق)
+            # 1) الرد التلقائي المباشر في المجموعة أو المحادثة الخاصة
             # ──────────────────────────────────────────────────────────
-            if reply_in_group and not getattr(event, 'is_private', False):
+            if reply_in_group and not is_priv:
                 try:
                     await event.reply(reply_text)
                     sent_reply = True
@@ -3244,11 +3259,26 @@ class TelegramClientManager:
                         logger.info(f"✅ تم الرد التلقائي البديل بنجاح في {group_identifier}")
                     except Exception as fb_err:
                         logger.warning(f"تعذر الرد التلقائي داخل المجموعة {group_identifier}: {fb_err}")
+            elif is_priv:
+                try:
+                    await event.reply(reply_text)
+                    sent_reply = True
+                    logger.info(f"✅ تم الرد التلقائي في المحادثة الخاصة مع {group_identifier}")
+                except Exception as priv_err:
+                    try:
+                        await self.client.send_message(
+                            entity=event.chat_id,
+                            message=reply_text,
+                            reply_to=message.id
+                        )
+                        sent_reply = True
+                    except Exception as fb_priv:
+                        logger.warning(f"تعذر الرد في الخاص: {fb_priv}")
 
             # ──────────────────────────────────────────────────────────
-            # 2) الرد التلقائي بالخاص على مرسل الكلمة المراقبة (مع حل الـ InputPeer)
+            # 2) الرد التلقائي بالخاص على مرسل الكلمة المراقبة في المجموعات (مع حل الـ InputPeer)
             # ──────────────────────────────────────────────────────────
-            if reply_in_dm and (sender or sender_id):
+            if reply_in_dm and not is_priv and (sender or sender_id):
                 input_sender = None
                 try:
                     input_sender = await event.get_input_sender()
