@@ -15534,8 +15534,8 @@ def api_push_settings_post():
 # ============================================================
 
 # ---- بيانات تسجيل الدخول الإدارية ----
-ADMIN_USERNAME = "Anwer"
-ADMIN_PASSWORD = "772997043a*anwer"
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Anwer")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "772997043a*anwer")
 
 # ---- إعدادات GitHub الخاصة بالبصمة والملفات ----
 BIO_REPO_OWNER  = "anwer1230"
