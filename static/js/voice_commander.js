@@ -736,6 +736,7 @@
                     align-items: flex-start;
                     gap: 12px;
                     pointer-events: none;
+                    touch-action: none;
                 }
                 .floating-voice-btn {
                     pointer-events: auto;
@@ -746,17 +747,37 @@
                     color: #ffffff;
                     border: none;
                     box-shadow: 0 8px 24px rgba(0, 136, 204, 0.45);
-                    cursor: pointer;
+                    cursor: grab;
+                    touch-action: none;
+                    user-select: none;
+                    -webkit-user-select: none;
                     display: flex;
                     align-items: center;
                     justify-content: center;
                     font-size: 1.45rem;
-                    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                    transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease;
                     position: relative;
                 }
                 .floating-voice-btn:hover {
                     transform: scale(1.08);
                     box-shadow: 0 10px 30px rgba(0, 136, 204, 0.6);
+                }
+                .floating-voice-btn.is-dragging {
+                    cursor: grabbing !important;
+                    transform: scale(1.15) !important;
+                    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5), 0 0 0 4px rgba(0, 136, 204, 0.4) !important;
+                    transition: none !important;
+                }
+                .voice-drag-handle-hint {
+                    position: absolute;
+                    top: 5px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    width: 14px;
+                    height: 3px;
+                    background: rgba(255, 255, 255, 0.65);
+                    border-radius: 2px;
+                    pointer-events: none;
                 }
                 .floating-voice-btn.voice-active {
                     background: linear-gradient(135deg, #e53935 0%, #b71c1c 100%);
@@ -923,8 +944,9 @@
                     </div>
                 </div>
 
-                <!-- زر الميكروفون العائم -->
-                <button type="button" class="floating-voice-btn" id="floatingVoiceBtn" title="التحكم الصوتي بالتطبيق (اضغط للتحدث)">
+                <!-- زر الميكروفون العائم القابل للتحريك والنقل -->
+                <button type="button" class="floating-voice-btn" id="floatingVoiceBtn" title="التحكم الصوتي (اضغط للتحدث، واسحب لنقل الزر إلى أي مكان)">
+                    <span class="voice-drag-handle-hint" title="اسحب للتحريك"></span>
                     <span class="voice-pulse-ring"></span>
                     <i class="fas fa-microphone" id="floatingVoiceIcon"></i>
                 </button>
@@ -934,10 +956,151 @@
             // إضافة مودال قاموس الأوامر الصوتية
             this.injectHelpModal();
 
-            // ربط أحداث النقر
-            document.getElementById('floatingVoiceBtn').addEventListener('click', () => this.toggle());
+            // تفعيل التحريك والسحب الحر والنقل للزر
+            this.setupDraggable(container, document.getElementById('floatingVoiceBtn'));
+
+            // ربط أحداث أزرار شريط الـ HUD
             document.getElementById('voiceTtsToggleBtn').addEventListener('click', () => this.toggleTTS());
             document.getElementById('voiceHudCloseBtn').addEventListener('click', () => this.stop());
+        }
+
+        setupDraggable(container, btn) {
+            if (!container || !btn) return;
+
+            // 1. استرجاع وتطبيق الموضع المحفوظ مسبقاً إن وجد
+            try {
+                const savedPos = localStorage.getItem('voice_hub_position');
+                if (savedPos) {
+                    const pos = JSON.parse(savedPos);
+                    const btnW = 58;
+                    const btnH = 58;
+                    const maxLeft = Math.max(8, window.innerWidth - btnW - 8);
+                    const maxTop = Math.max(8, window.innerHeight - btnH - 8);
+                    const curLeft = Math.max(8, Math.min(parseInt(pos.left, 10), maxLeft));
+                    const curTop = Math.max(8, Math.min(parseInt(pos.top, 10), maxTop));
+
+                    container.style.left = curLeft + 'px';
+                    container.style.top = curTop + 'px';
+                    container.style.bottom = 'auto';
+                    container.style.right = 'auto';
+
+                    if (curTop < window.innerHeight / 2) {
+                        container.style.flexDirection = 'column-reverse';
+                    } else {
+                        container.style.flexDirection = 'column';
+                    }
+                }
+            } catch (_) {}
+
+            // 2. إدارة أحداث السحب والتحريك (Pointer Events الشاملة للجوال والكمبيوتر)
+            let isPointerDown = false;
+            let isDragging = false;
+            let startX = 0, startY = 0;
+            let initialLeft = 0, initialTop = 0;
+            const dragThreshold = 6;
+
+            btn.addEventListener('pointerdown', (e) => {
+                if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+                isPointerDown = true;
+                isDragging = false;
+                startX = e.clientX;
+                startY = e.clientY;
+
+                const rect = container.getBoundingClientRect();
+                initialLeft = rect.left;
+                initialTop = rect.top;
+
+                try {
+                    btn.setPointerCapture(e.pointerId);
+                } catch (_) {}
+            });
+
+            btn.addEventListener('pointermove', (e) => {
+                if (!isPointerDown) return;
+
+                const dx = e.clientX - startX;
+                const dy = e.clientY - startY;
+
+                if (!isDragging && Math.hypot(dx, dy) > dragThreshold) {
+                    isDragging = true;
+                    btn.classList.add('is-dragging');
+                }
+
+                if (isDragging) {
+                    let newLeft = initialLeft + dx;
+                    let newTop = initialTop + dy;
+
+                    const btnW = btn.offsetWidth || 58;
+                    const btnH = btn.offsetHeight || 58;
+                    const maxL = Math.max(8, window.innerWidth - btnW - 8);
+                    const maxT = Math.max(8, window.innerHeight - btnH - 8);
+
+                    newLeft = Math.max(8, Math.min(newLeft, maxL));
+                    newTop = Math.max(8, Math.min(newTop, maxT));
+
+                    container.style.left = newLeft + 'px';
+                    container.style.top = newTop + 'px';
+                    container.style.bottom = 'auto';
+                    container.style.right = 'auto';
+
+                    if (newTop < window.innerHeight / 2) {
+                        container.style.flexDirection = 'column-reverse';
+                    } else {
+                        container.style.flexDirection = 'column';
+                    }
+                }
+            });
+
+            const onPointerUp = (e) => {
+                if (!isPointerDown) return;
+                isPointerDown = false;
+
+                try {
+                    btn.releasePointerCapture(e.pointerId);
+                } catch (_) {}
+
+                if (isDragging) {
+                    btn.classList.remove('is-dragging');
+                    try {
+                        localStorage.setItem('voice_hub_position', JSON.stringify({
+                            left: container.style.left,
+                            top: container.style.top
+                        }));
+                    } catch (_) {}
+                    // منع إطلاق الـ toggle بعد السحب
+                    setTimeout(() => { isDragging = false; }, 80);
+                } else {
+                    // نقرة عادية بدون سحب -> تفعيل أو إيقاف الاستماع
+                    this.toggle();
+                }
+            };
+
+            btn.addEventListener('pointerup', onPointerUp);
+            btn.addEventListener('pointercancel', onPointerUp);
+
+            btn.addEventListener('click', (e) => {
+                if (isDragging) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            });
+
+            // ضبط الموقع عند تدوير الشاشة أو تغيير أبعاد النافذة
+            window.addEventListener('resize', () => {
+                const rect = container.getBoundingClientRect();
+                const btnW = btn.offsetWidth || 58;
+                const btnH = btn.offsetHeight || 58;
+                const maxL = Math.max(8, window.innerWidth - btnW - 8);
+                const maxT = Math.max(8, window.innerHeight - btnH - 8);
+
+                let clampL = Math.max(8, Math.min(rect.left, maxL));
+                let clampT = Math.max(8, Math.min(rect.top, maxT));
+
+                container.style.left = clampL + 'px';
+                container.style.top = clampT + 'px';
+                container.style.bottom = 'auto';
+                container.style.right = 'auto';
+            });
         }
 
         injectHelpModal() {
