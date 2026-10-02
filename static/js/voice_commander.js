@@ -638,6 +638,39 @@
             const hud = document.getElementById('voiceCommanderHud');
             const wave = document.getElementById('voiceWaveIndicator');
 
+            // ── مزامنة بطاقة وأيقونة الأوامر الصوتية في رأس الصفحة المقابلة للمزايا ──
+            const headerBtn   = document.getElementById('headerVoiceToggleBtn');
+            const headerIcon  = document.getElementById('headerVoiceIcon');
+            const headerBadge = document.getElementById('headerVoiceStatusBadge');
+            const headerWave  = document.getElementById('headerVoiceWave');
+            const headerBox   = document.getElementById('headerVoiceBox');
+
+            if (headerBtn) {
+                if (active) {
+                    headerBtn.classList.add('voice-header-active');
+                    if (headerIcon) {
+                        headerIcon.className = 'fas fa-microphone text-danger fa-beat';
+                    }
+                    if (headerBadge) {
+                        headerBadge.textContent = '🔴 يستمع الآن (تحدث بأمرك)';
+                        headerBadge.className = 'badge bg-danger text-white shadow-sm';
+                    }
+                    if (headerWave) headerWave.style.display = 'inline-flex';
+                    if (headerBox) headerBox.classList.add('voice-box-active');
+                } else {
+                    headerBtn.classList.remove('voice-header-active');
+                    if (headerIcon) {
+                        headerIcon.className = 'fas fa-microphone text-primary';
+                    }
+                    if (headerBadge) {
+                        headerBadge.textContent = 'انقر للتحدث';
+                        headerBadge.className = 'badge bg-light text-primary border border-primary border-opacity-25';
+                    }
+                    if (headerWave) headerWave.style.display = 'none';
+                    if (headerBox) headerBox.classList.remove('voice-box-active');
+                }
+            }
+
             if (btn) {
                 if (active) {
                     btn.classList.add('voice-active');
