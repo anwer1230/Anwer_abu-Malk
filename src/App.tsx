@@ -46,7 +46,29 @@ import { TelegramAuthScreen } from './components/Auth/TelegramAuthScreen';
 import { useMobileNavigation } from './hooks/useMobileNavigation';
 
 const TelegramAppContent: React.FC = () => {
-  const { isAuthenticated, inAppNotifications, dismissNotification, activeModal, setActiveModal } = useTelegram();
+  const { isAuthenticated, inAppNotifications, dismissNotification, activeModal, setActiveModal, chats, setActiveChatId } = useTelegram();
+
+  // الاستماع للأمر الصوتي: 'أبو مالك، افتح آخر رسالة' لفتح أحدث محادثة غير مقروءة تلقائياً
+  React.useEffect(() => {
+    const handleVoiceOpenLatestUnread = () => {
+      if (!chats || chats.length === 0) return;
+      // البحث عن أول محادثة تحتوي على رسائل غير مقروءة
+      const unreadChat = chats.find(c => (c.unreadCount || 0) > 0);
+      if (unreadChat) {
+        setActiveChatId(unreadChat.id);
+        console.log('[VoiceCommander App] تم فتح أحدث محادثة غير مقروءة:', unreadChat.title);
+      } else {
+        // إذا لم تكن هناك رسائل غير مقروءة، فتح أحدث محادثة نشطة
+        setActiveChatId(chats[0].id);
+        console.log('[VoiceCommander App] لا توجد رسائل غير مقروءة، تم فتح أحدث محادثة نشطة:', chats[0].title);
+      }
+    };
+
+    window.addEventListener('openLatestUnreadChat', handleVoiceOpenLatestUnread);
+    return () => {
+      window.removeEventListener('openLatestUnreadChat', handleVoiceOpenLatestUnread);
+    };
+  }, [chats, setActiveChatId]);
 
   // Activate mobile hardware back button, touch navigation & popstate stack
   useMobileNavigation();

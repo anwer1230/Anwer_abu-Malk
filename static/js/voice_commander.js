@@ -581,6 +581,18 @@
 
             try {
                 // ════════════════════════════════════════════════════════════
+                // 0. أمر "أبو مالك، افتح آخر رسالة" لفتح أحدث محادثة غير مقروءة
+                // ════════════════════════════════════════════════════════════
+                const isAbuMalkLatestMsgIntent = 
+                    (norm.includes('ابو مالك') && (norm.includes('افتح') || norm.includes('اقرا') || norm.includes('شاهد') || norm.includes('رساله') || norm.includes('محادثه'))) ||
+                    (norm.includes('افتح اخر رساله') || norm.includes('افتح احدث رساله') || norm.includes('افتح اخر محادثه') || norm.includes('افتح احدث محادثه') || norm.includes('احدث محادثه غير مقروءه') || norm.includes('افتح المحادثه غير المقروءه') || norm.includes('اقرا اخر رساله') || (norm.includes('افتح') && norm.includes('اخر رساله')) || (norm.includes('افتح') && norm.includes('الرساله الاخيره')));
+
+                if (isAbuMalkLatestMsgIntent) {
+                    await this.cmdOpenLatestUnreadMessage();
+                    return;
+                }
+
+                // ════════════════════════════════════════════════════════════
                 // 1. التحقق من الرموز (Verification of codes via voice command)
                 // ════════════════════════════════════════════════════════════
                 const isVerifyFormVisible = document.getElementById('verifyForm')?.style.display !== 'none';
@@ -756,6 +768,76 @@
         // ════════════════════════════════════════════════════════════
         // الدوال التنفيذية للأوامر الصوتية الفعلية
         // ════════════════════════════════════════════════════════════
+
+        // ── 0. أمر "أبو مالك، افتح آخر رسالة" ──
+        async cmdOpenLatestUnreadMessage() {
+            this.speak('أهلاً يا أبو مالك، جارٍ فحص وفتح أحدث محادثة غير مقروءة لك الآن.');
+            console.log('[VoiceCommander] 🚀 Executing: "أبو مالك، افتح آخر رسالة"');
+
+            let opened = false;
+            let targetTitle = '';
+
+            // 1. إرسال حدث مخصص لتطبيق تيليجرام الرئيسي (React Context)
+            window.dispatchEvent(new CustomEvent('openLatestUnreadChat'));
+
+            // 2. فحص عناصر واجهة المحادثات في الشريط الجانبي (Sidebar DOM)
+            const chatItems = Array.from(document.querySelectorAll(
+                '#tg-app-root [class*="cursor-pointer"], .sidebar-chat-item, [data-chat-id], div[class*="border-b"][class*="cursor-pointer"]'
+            ));
+
+            // البحث عن محادثة بها شارة رسائل غير مقروءة (Badge)
+            for (const item of chatItems) {
+                const badge = item.querySelector('.bg-\\[\\#2481cc\\], [class*="rounded-full"], .badge-unread');
+                if (badge && parseInt(badge.textContent.trim(), 10) > 0) {
+                    this.highlight(item);
+                    item.click();
+                    targetTitle = item.querySelector('h4, .chat-title')?.textContent?.trim() || 'المحادثة غير المقروءة';
+                    opened = true;
+                    console.log('[VoiceCommander] Clicked unread chat item:', targetTitle);
+                    break;
+                }
+            }
+
+            // 3. إذا لم تكن هناك شارات غير مقروءة، فتح أول محادثة في القائمة
+            if (!opened && chatItems.length > 0) {
+                const firstChat = chatItems[0];
+                this.highlight(firstChat);
+                firstChat.click();
+                targetTitle = firstChat.querySelector('h4, .chat-title')?.textContent?.trim() || 'أحدث محادثة';
+                opened = true;
+                console.log('[VoiceCommander] Clicked latest active chat item:', targetTitle);
+            }
+
+            // 4. فحص واجهة القالب الرئيسي (HTML Modals: تنبيهاتي الجديدة أو رسائلي وسجل الإرسال)
+            const alertsBadge = document.getElementById('myAlertsCount');
+            const alertsCount = alertsBadge ? (parseInt(alertsBadge.textContent.trim(), 10) || 0) : 0;
+
+            if (!opened && alertsCount > 0) {
+                const alertsBtn = document.querySelector('[data-bs-target="#myAlertsModal"]') || document.getElementById('myAlertsBtn');
+                if (alertsBtn) {
+                    this.highlight(alertsBtn);
+                    alertsBtn.click();
+                    opened = true;
+                    targetTitle = 'تنبيهاتي الجديدة';
+                }
+            } else if (!opened) {
+                const sentMsgBtn = document.querySelector('[data-bs-target="#sentMessagesModal"]');
+                if (sentMsgBtn) {
+                    this.highlight(sentMsgBtn);
+                    sentMsgBtn.click();
+                    opened = true;
+                    targetTitle = 'سجل الرسائل الأخيرة';
+                }
+            }
+
+            setTimeout(() => {
+                if (targetTitle) {
+                    this.speak(`تم فتح ${targetTitle} بنجاح يا أبو مالك.`);
+                } else {
+                    this.speak('تم فتح أحدث محادثة لديك بنجاح يا أبو مالك.');
+                }
+            }, 900);
+        }
 
         // ── 1. بدء تسجيل الدخول ──
         async cmdLoginNamedAccount(uid, phone, name) {
@@ -1697,6 +1779,7 @@
                                     <div class="p-3 bg-white rounded-3 shadow-sm border-start border-warning h-100">
                                         <h6 class="fw-bold text-warning mb-2"><i class="fas fa-paper-plane me-1"></i> 4. المراسلة والروابط والحالة</h6>
                                         <ul class="list-unstyled mb-0 small text-secondary">
+                                            <li class="mb-1 text-primary fw-bold">🔹 <strong>«أبو مالك، افتح آخر رسالة»</strong>: فتح أحدث محادثة غير مقروءة تلقائياً.</li>
                                             <li class="mb-1">🔹 <strong>«ابدأ الإرسال الآن»</strong>: إرسال فوري فوري للرسالة.</li>
                                             <li class="mb-1">🔹 <strong>«استعرض روابط قاعدة البيانات»</strong>: فحص روابط السحابة.</li>
                                             <li class="mb-1">🔹 <strong>«صدّر الروابط ملف PDF»</strong> / <strong>«ملف TXT»</strong>.</li>
