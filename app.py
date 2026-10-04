@@ -2042,29 +2042,63 @@ class TelegramClientManager:
             except Exception:
                 pass
 
-            # ── فحص الأعضاء بحثاً عن بوتات الحماية ──────────────────────
+            # ── فحص دقيق وشامل لكشف أي بوتات في المجموعة ──────────────────────
+            # 1. استعلام Telegram المباشر عن بوتات المجموعة
             try:
-                async for participant in self.client.iter_participants(entity_obj, limit=100):
-                    uname = (getattr(participant, 'username', '') or '').lower()
-                    if not uname:
-                        continue
-                    if uname in PROTECTION_BOTS:
-                        detected_bots.append(f"@{uname}")
-                        reason = f'بوت حماية مكتشف: @{uname}'
-                        logger.info(f"Group {chat_id} protected by known bot @{uname}")
-                    elif any(s in uname for s in PROTECTION_BOT_SUBSTRINGS):
-                        detected_bots.append(f"@{uname}")
-                        reason = f'بوت حماية مشتبه: @{uname}'
-                        logger.info(f"Group {chat_id} possibly protected by @{uname}")
-                        # ── تعلم تلقائي: حفظ البوت المشتبه به ───────────
-                        try:
-                            add_discovered_bot(uname)
-                        except Exception:
-                            pass
-                    if len(detected_bots) >= 5:
-                        break
-            except Exception as iter_err:
-                logger.debug(f"iter_participants فشل لـ {chat_id}: {iter_err}")
+                from telethon.tl.types import ChannelParticipantsBots
+                async for bot_user in self.client.iter_participants(entity_obj, filter=ChannelParticipantsBots, limit=50):
+                    b_uname = (getattr(bot_user, 'username', '') or '').lower()
+                    b_label = f"@{b_uname}" if b_uname else getattr(bot_user, 'first_name', 'Bot')
+                    if b_label not in detected_bots:
+                        detected_bots.append(b_label)
+                        if b_uname:
+                            add_discovered_bot(b_uname)
+            except Exception as _bot_filter_err:
+                logger.debug(f"ChannelParticipantsBots filter note for {chat_id}: {_bot_filter_err}")
+
+            # 2. فحص المشاركين لكشف البوتات وبوتات الحماية
+            if not detected_bots:
+                try:
+                    async for participant in self.client.iter_participants(entity_obj, limit=100):
+                        uname = (getattr(participant, 'username', '') or '').lower()
+                        is_bot = getattr(participant, 'bot', False) or (uname and uname.endswith('bot'))
+                        if uname in PROTECTION_BOTS:
+                            b_label = f"@{uname}"
+                            if b_label not in detected_bots:
+                                detected_bots.append(b_label)
+                            reason = f'بوت حماية مكتشف: @{uname}'
+                            logger.info(f"Group {chat_id} protected by known bot @{uname}")
+                        elif is_bot or any(s in uname for s in PROTECTION_BOT_SUBSTRINGS):
+                            b_label = f"@{uname}" if uname else getattr(participant, 'first_name', 'Bot')
+                            if b_label not in detected_bots:
+                                detected_bots.append(b_label)
+                            if uname:
+                                try:
+                                    add_discovered_bot(uname)
+                                except Exception:
+                                    pass
+                        if len(detected_bots) >= 5:
+                            break
+                except Exception as iter_err:
+                    logger.debug(f"iter_participants فشل لـ {chat_id}: {iter_err}")
+
+            # 3. فحص المشرفين بحثاً عن بوتات الإدارة والحماية
+            if not detected_bots:
+                try:
+                    from telethon.tl.types import ChannelParticipantsAdmins
+                    async for admin in self.client.iter_participants(entity_obj, filter=ChannelParticipantsAdmins, limit=30):
+                        adm_uname = (getattr(admin, 'username', '') or '').lower()
+                        is_adm_bot = getattr(admin, 'bot', False) or (adm_uname and adm_uname.endswith('bot')) or (adm_uname in PROTECTION_BOTS)
+                        if is_adm_bot:
+                            b_label = f"@{adm_uname}" if adm_uname else getattr(admin, 'first_name', 'AdminBot')
+                            if b_label not in detected_bots:
+                                detected_bots.append(b_label)
+                            if adm_uname:
+                                add_discovered_bot(adm_uname)
+                        if len(detected_bots) >= 5:
+                            break
+                except Exception as _adm_err:
+                    logger.debug(f"ChannelParticipantsAdmins check error: {_adm_err}")
 
             if detected_bots:
                 reason = f'بوتات حماية مكتشفة: {", ".join(detected_bots[:5])}'
@@ -4627,43 +4661,24 @@ class TelegramManager:
 
             entity_obj = self._resolve_entity(client_manager, entity)
 
-            # ── 1. جلب التقرير من قاعدة البيانات الخارجية (Firestore) أو فحصه وحفظه إن كانت جديدة ──
-            report, is_new = self.get_or_create_group_safety_report(
-                user_id, client_manager, entity_obj, entity, sample_message=message
-            )
-
-            # ── 2. تكييف الرسالة وتغيير أو حذف الكلمات والعبارات التي تستدعي الحظر ──
-            final_message, _, safety_actions = self.adapt_message_to_group_report(
-                message, report, has_media=False
-            )
-            if safety_actions:
-                socketio.emit('log_update', {
-                    "message": f"🛡️ [{entity}] تطبيق إجراءات الأمان للرسالة: {', '.join(safety_actions[:2])}"
-                }, to=user_id)
-
-            # ── 3. فحص هل المجموعة تمنع الإعلانات بشكل كلي وتحتوي على بوتات حماية -> إرسال ذكي ──
-            needs_smart = bool(
-                report.get('requires_smart_send') or 
-                (report.get('is_protected') and report.get('blocks_ads'))
-            )
-
-            # ── تحديد الإجراء: من الفحص المسبق أو الإعدادات أو تقرير المجموعة ──────────
+            # تحديد الإجراء وخاصية الإرسال المحددة من المستخدم بناءً على فحص دقيق للبوتات (بدون قراءة آخر 50 رسالة)
             if forced_action is not None:
                 action = forced_action
-                if action == 'skip':
-                    socketio.emit('log_update', {
-                        "message": f"⏭️ تم تخطي {entity} (قرار الفحص الاستباقي)"
-                    }, to=user_id)
-                    return {"success": False, "skipped": True,
-                            "message": f"تم تخطي المجموعة: {entity}"}
-            elif needs_smart:
-                action = 'salam'
+                action_reason = None
             else:
-                action, _ = self._check_group_protection(user_id, client_manager, entity_obj, entity)
+                action, action_reason = self._check_group_protection(user_id, client_manager, entity_obj, entity)
 
-            # ── الإرسال الذكي للمجموعات التي بها بوتات حماية وتمنع الإعلانات كلياً (وضع salam) ──
-            # نتحقق من عدم إجبار التنقية المباشرة (sanitize) في وضع الإرسال الجماعي
-            if action == 'salam' or (needs_smart and forced_action not in ('sanitize', 'send')):
+            if action == 'skip':
+                socketio.emit('log_update', {
+                    "message": f"⏭️ تم تخطي {entity} (المجموعة تحتوي على بوتات - خيار التخطي محدد من المستخدم)"
+                }, to=user_id)
+                return {"success": False, "skipped": True,
+                        "message": f"تم تخطي المجموعة: {entity} (تحتوي على بوتات)"}
+
+            final_message = message
+
+            # ── الإرسال الذكي للمجموعات التي بها بوتات بخاصية salam ──
+            if action == 'salam':
                 group_id = getattr(entity_obj, 'id', None) or hash(str(entity))
                 key = f"{user_id}_{group_id}"
                 if key in self._smart_running:
@@ -4751,13 +4766,7 @@ class TelegramManager:
             }, to=user_id)
             return saved_report, False
 
-        # 2. مجموعة جديدة غير متوفرة في قاعدة البيانات -> فحص وتحليل كامل بالذكاء
-        logger.info(f"🆕 Group {entity_label} is new. Scanning and persisting to external DB...")
-        socketio.emit('log_update', {
-            "message": f"🆕 [مجموعة جديدة] {entity_label} غير مسجلة في قاعدة البيانات — جارٍ الفحص والتحليل بالذكاء وحفظ النتائج في قاعدة البيانات..."
-        }, to=user_id)
-
-        # أ) فحص بوتات الحماية
+        # 2. فحص دقيق لوجود بوتات في المجموعة بدون قراءة آخر 50 رسالة
         is_prot = False
         prot_reason = None
         bots = []
@@ -4768,48 +4777,28 @@ class TelegramManager:
         except Exception as _pe:
             logger.debug(f"Protection details error for {entity_label}: {_pe}")
 
-        # ب) فحص الذكاء الاصطناعي لآخر 50 محادثة
-        ai_res = self.scan_and_analyze_group_with_ai(
-            user_id, client_manager, entity_obj, entity_label,
-            sample_message=sample_message, send_report_to_me=True
-        )
-
-        # ج) تحديد إذا كانت المجموعة تمنع الإعلانات بشكل كلي
-        prohibited = set(ai_res.get('prohibited_actions', []))
-        causes_str = " ".join(ai_res.get('causes', []) + ai_res.get('mistakes_by_others', [])).lower()
-
-        blocks_ads = False
-        requires_smart_send = False
-
-        if is_prot or ai_res.get('protected') or len(bots) > 0:
-            if ('no_links' in prohibited or 'no_phones' in prohibited or 'skip_group' in prohibited 
-                or any(kw in causes_str for kw in ['إعلان', 'نشر', 'رابط', 'روابط', 'ترويج', 'تسويق', 'spam', 'ads', 'link'])):
-                blocks_ads = True
-                requires_smart_send = True
-
-        if ai_res.get('risk_assessment') in ('high', 'critical') and (is_prot or len(bots) > 0):
-            blocks_ads = True
-            requires_smart_send = True
+        has_bots = bool(is_prot or bots)
+        summary = f"تم رصد بوتات في المجموعة: {', '.join(bots[:3])}" if bots else (prot_reason or "مجموعة آمنة بدون بوتات")
 
         new_report = {
             "group_key": str(entity_label),
             "group_id": str(chat_id) if chat_id else "",
             "group_title": str(title),
             "username": str(username) if username else "",
-            "is_protected": bool(is_prot or ai_res.get('protected')),
-            "blocks_ads": bool(blocks_ads),
-            "requires_smart_send": bool(requires_smart_send),
+            "is_protected": has_bots,
+            "blocks_ads": False,
+            "requires_smart_send": False,
             "protection_bots": bots or [],
-            "risk_assessment": ai_res.get('risk_assessment', 'low'),
-            "punished_count": ai_res.get('punished_count', 0),
-            "causes": ai_res.get('causes', []),
-            "mistakes_by_others": ai_res.get('mistakes_by_others', []),
-            "prohibited_actions": list(prohibited),
-            "keywords_to_avoid": ai_res.get('keywords_to_avoid', []),
-            "actions_taken": ai_res.get('actions_taken', []),
-            "summary_ar": ai_res.get('summary_ar', ''),
-            "recommended_action": 'salam' if requires_smart_send else ('sanitize' if is_prot else 'send'),
-            "can_send_media": bool(ai_res.get('can_send_media', True) and 'no_media' not in prohibited),
+            "risk_assessment": 'medium' if has_bots else 'low',
+            "punished_count": 0,
+            "causes": [],
+            "mistakes_by_others": [],
+            "prohibited_actions": [],
+            "keywords_to_avoid": [],
+            "actions_taken": [],
+            "summary_ar": summary,
+            "recommended_action": 'salam' if has_bots else 'send',
+            "can_send_media": True,
             "analyzed_at": time.strftime('%Y-%m-%d %H:%M:%S')
         }
 
@@ -4897,7 +4886,7 @@ class TelegramManager:
 
     def _check_group_protection(self, user_id, client_manager, entity_obj, entity_label):
         """
-        التحقق من حماية المجموعة وإرجاع الإجراء المناسب بناءً على فحص قاعدة البيانات.
+        التحقق بدقة مما إذا كانت المجموعة تحتوي على بوتات وتطبيق خاصية الإرسال المحددة من المستخدم.
         """
         try:
             settings = load_settings(user_id)
@@ -4906,23 +4895,26 @@ class TelegramManager:
             if mode == 'off':
                 return 'send', None
 
-            report, _ = self.get_or_create_group_safety_report(user_id, client_manager, entity_obj, entity_label)
+            # فحص دقيق لوجود بوتات في المجموعة بدون قراءة آخر 50 رسالة
+            is_prot, reason, bots = client_manager.run_coroutine(
+                client_manager.get_group_protection_details(entity_obj)
+            )
 
-            is_prot = bool(report.get('is_protected', False))
-            blocks_ads = bool(report.get('blocks_ads', False))
-            requires_smart = bool(report.get('requires_smart_send', False))
-
-            if requires_smart or (is_prot and blocks_ads):
-                return 'salam', report.get('summary_ar') or 'بوتات حماية تمنع الإعلانات'
-
-            if is_prot:
+            # إذا كانت المجموعة تحتوي على بوتات: تطبيق خاصية الإرسال المحددة من المستخدم
+            if is_prot or bots:
+                bot_desc = f"بوتات مكتشفة: {', '.join(bots[:3])}" if bots else (reason or "مجموعة تحتوي على بوتات")
                 if mode == 'skip':
-                    return 'skip', report.get('summary_ar')
-                if mode == 'salam':
-                    return 'salam', report.get('summary_ar')
-                if mode in ('smart', 'always'):
-                    return 'sanitize', report.get('summary_ar')
+                    return 'skip', bot_desc
+                elif mode == 'salam':
+                    return 'salam', bot_desc
+                elif mode in ('smart', 'always', 'sanitize'):
+                    return 'sanitize', bot_desc
+                elif mode in ('off', 'send'):
+                    return 'send', None
+                else:
+                    return 'salam', bot_desc
 
+            # المجموعة لا تحتوي على بوتات -> إرسال مباشر
             return 'send', None
         except Exception as e:
             logger.warning(f"_check_group_protection error: {e}")
@@ -5923,28 +5915,6 @@ def execute_scheduled_messages(user_id, settings):
         for i, group in enumerate(groups, 1):
             try:
                 curr_message = message
-                try:
-                    with USERS_LOCK:
-                        cm = USERS.get(user_id, {}).get('client_manager')
-                    if cm and cm.client:
-                        ent_obj = telegram_manager._resolve_entity(cm, group)
-                        ai_check = telegram_manager.scan_and_analyze_group_with_ai(
-                            user_id, cm, ent_obj, group, sample_message=message, send_report_to_me=True
-                        )
-                        if ai_check.get('should_skip'):
-                            socketio.emit('log_update', {
-                                "message": f"⏭️ [{i}/{len(groups)}] تخطي آلي لـ {group}: {ai_check.get('skip_reason', 'رُصد حظر قطعي للأعضاء')}"
-                            }, to=user_id)
-                            continue
-                        if ai_check.get('adapted_message'):
-                            curr_message = ai_check.get('adapted_message')
-                        if ai_check.get('actions_taken'):
-                            socketio.emit('log_update', {
-                                "message": f"🛡️ [{i}/{len(groups)}] تلافي أخطاء الآخرين في {group}: {', '.join(ai_check['actions_taken'][:2])}"
-                            }, to=user_id)
-                except Exception as _ai_ex:
-                    logger.debug(f"AI inspection fallback in scheduled send: {_ai_ex}")
-
                 result = telegram_manager.send_message_async(user_id, group, curr_message)
 
                 if isinstance(result, dict) and result.get('skipped'):
@@ -8044,54 +8014,49 @@ def api_send_now():
                             skipped_count += 1
                             continue
 
-                    # 3. التحقق من تقرير الأمان وتكييف الرسالة
-                    report, is_new = telegram_manager.get_or_create_group_safety_report(
-                        user_id, cm, entity_obj, group, sample_message=message
+                    # 3. فحص دقيق لوجود بوتات في المجموعة بدون قراءة آخر 50 رسالة
+                    is_prot, prot_reason, detected_bots = cm.run_coroutine(
+                        cm.get_group_protection_details(entity_obj)
                     )
-                    curr_message, can_media, safety_actions = telegram_manager.adapt_message_to_group_report(
-                        message, report, has_media=bool(image_files)
-                    )
-                    curr_images = image_files if can_media else []
-                    if safety_actions:
-                        socketio.emit('log_update', {
-                            "message": f"🛡️ [{i}/{len(groups_list)}] تلافي مسببات الحظر في {group}: {', '.join(safety_actions[:2])}"
-                        }, to=user_id)
+                    has_bots = bool(is_prot or detected_bots)
+                    curr_images = image_files
 
-                    # إذا حدد المستخدم إجراء التخطي المسبق
-                    if pre_scan_action == 'skip':
-                        skip_msg = f"⏭️ [{i}/{len(groups_list)}] تم تخطي {group} (بناءً على اختيارك)"
+                    # 4. تحديد خاصية الإرسال المحددة من المستخدم
+                    user_settings = load_settings(user_id)
+                    user_mode = (user_settings.get('sanitize_mode') or 'salam').lower()
+
+                    if pre_scan_action:
+                        action_to_use = pre_scan_action
+                    elif has_bots:
+                        # المجموعة تحتوي على بوتات: تطبيق خاصية الإرسال المحددة من المستخدم
+                        if user_mode == 'skip':
+                            action_to_use = 'skip'
+                        elif user_mode == 'salam' or force_salam:
+                            action_to_use = 'salam'
+                        elif user_mode in ('smart', 'always', 'sanitize'):
+                            action_to_use = 'sanitize'
+                        elif user_mode in ('off', 'send'):
+                            action_to_use = 'send'
+                        else:
+                            action_to_use = 'salam'
+                    else:
+                        # المجموعة لا تحتوي على بوتات: إرسال مباشر
+                        action_to_use = 'send'
+
+                    if action_to_use == 'skip':
+                        skip_msg = f"⏭️ [{i}/{len(groups_list)}] تم تخطي {group}: مجموعة تحتوي على بوتات وخيار التخطي محدد من المستخدم"
                         socketio.emit('log_update', {"message": skip_msg}, to=user_id)
                         socketio.emit('send_progress', {
                             "group": group,
                             "index": i,
                             "total": len(groups_list),
                             "status": "skipped",
-                            "reason": "تم التخطي: بناءً على اختيار المستخدم",
+                            "reason": "تم التخطي: مجموعة تحتوي على بوتات",
                             "emoji": "⏭️",
                             "message": skip_msg
                         }, to=user_id)
                         skipped_count += 1
                         continue
-
-                    # 4. تحديد الإجراء ومنع تعليق العميل بسبب وضع salam (P0)
-                    needs_smart = bool(
-                        report.get('requires_smart_send') or 
-                        (report.get('is_protected') and report.get('blocks_ads'))
-                    )
-
-                    # في وضع الإرسال الجماعي (Batch)، لا نفعّل salam تلقائياً لتجنب حجز العميل
-                    if is_batch and not force_salam:
-                        action_to_use = 'sanitize'
-                        if needs_smart or pre_scan_action == 'salam':
-                            logger.info(f"ℹ️ Batch mode: تخطي salam للمجموعة {group}، استخدام sanitize لتسريع الإرسال ومنع التعليق.")
-                            socketio.emit('log_update', {
-                                "message": f"ℹ️ [{i}/{len(groups_list)}] وضع الإرسال الجماعي: استخدام نمط التنقية المباشرة (sanitize) لتفادي تعليق المجموعات في {group}"
-                            }, to=user_id)
-                    else:
-                        if needs_smart or pre_scan_action == 'salam' or force_salam:
-                            action_to_use = 'salam'
-                        else:
-                            action_to_use = 'send'
 
                     # 5. محاولة الإرسال مع معالجة FloodWaitError وإعادة المحاولة لمرة واحدة (P2)
                     send_attempts = 0
@@ -8103,12 +8068,28 @@ def api_send_now():
                         try:
                             if action_to_use == 'salam':
                                 socketio.emit('log_update', {
-                                    "message": f"🤖 [{i}/{len(groups_list)}] جاري الإرسال بوضع salam لـ {group}..."
+                                    "message": f"🤖 [{i}/{len(groups_list)}] جاري الإرسال بوضع سلام (salam) لـ {group}..."
                                 }, to=user_id)
                                 result = telegram_manager.send_message_async(
                                     user_id, group, curr_message, forced_action='salam',
                                     wait_for_completion=is_batch, cancel_event=cancel_event
                                 )
+                            elif action_to_use == 'sanitize':
+                                socketio.emit('log_update', {
+                                    "message": f"🛡️ [{i}/{len(groups_list)}] جاري الإرسال بوضع التنقية (sanitize) لـ {group}..."
+                                }, to=user_id)
+                                if curr_images and curr_message:
+                                    result = telegram_manager.send_message_with_media_async(
+                                        user_id, group, curr_message, curr_images
+                                    )
+                                elif curr_images:
+                                    result = telegram_manager.send_media_async(
+                                        user_id, group, curr_images
+                                    )
+                                else:
+                                    result = telegram_manager.send_message_async(
+                                        user_id, group, curr_message, forced_action='sanitize'
+                                    )
                             elif curr_images and curr_message:
                                 result = telegram_manager.send_message_with_media_async(
                                     user_id, group, curr_message, curr_images
