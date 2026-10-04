@@ -1024,13 +1024,19 @@
 
         <!-- العنوان الرئيسي الجديد -->
         <div class="header-title">
-            <!-- صورة وجه الطفل الرئيسية للتطبيق -->
+            <!-- صورة وجه الطفل الرئيسية للتطبيق مع زر الرفع والتخصيص المباشر -->
             <div class="d-flex align-items-center justify-content-center mb-3">
                 <div class="position-relative">
-                    <img src="/static/icons/app-logo.png" alt="صورة وجه الطفل" 
-                         style="width: 105px; height: 105px; border-radius: 50%; object-fit: cover; border: 3.5px solid #ffffff; box-shadow: 0 10px 30px rgba(0,0,0,0.45); transition: transform 0.3s ease;"
+                    <img id="mainAppBabyAvatar"
+                         src="/static/icons/app-logo.png?v=3" 
+                         alt="صورة وجه الطفل" 
+                         style="width: 110px; height: 110px; border-radius: 50%; object-fit: cover; border: 3.5px solid #ffffff; box-shadow: 0 10px 30px rgba(0,0,0,0.5); transition: transform 0.3s ease;"
                          onmouseover="this.style.transform='scale(1.08)'" onmouseout="this.style.transform='scale(1)'">
                     <span class="position-absolute bottom-0 end-0 bg-success border border-white rounded-circle" style="width:20px;height:20px;box-shadow:0 0 8px #28a745;" title="نشط"></span>
+                    <label for="childPhotoInput" class="position-absolute bottom-0 start-0 bg-primary text-white border border-white rounded-circle d-flex align-items-center justify-content-center shadow" style="width:30px;height:30px;cursor:pointer;transition:transform 0.2s;" title="رفع واقتصاص صورة الطفل الأصلية فوراً" onmouseover="this.style.transform='scale(1.15)'" onmouseout="this.style.transform='scale(1)'">
+                        <i class="fas fa-camera" style="font-size:0.8rem;"></i>
+                    </label>
+                    <input type="file" id="childPhotoInput" accept="image/*" style="display:none;" onchange="handleDirectChildPhotoUpload(this)">
                 </div>
             </div>
 
@@ -13407,8 +13413,41 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }).catch(() => {});
 });
+function handleDirectChildPhotoUpload(input) {
+    if (!input.files || !input.files[0]) return;
+    const file = input.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const toast = document.createElement('div');
+    toast.className = 'alert alert-info position-fixed top-0 start-50 translate-middle-x mt-3 shadow-lg';
+    toast.style.zIndex = '999999';
+    toast.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i> جاري حفظ واقتصاص صورة وجه الطفل الأصلية وتطبيقها كخلفية وأيقونة...';
+    document.body.appendChild(toast);
+
+    fetch('/api/upload_child_photo', {
+        method: 'POST',
+        body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+        toast.remove();
+        if (data.success) {
+            const t = Date.now();
+            document.body.style.backgroundImage = "linear-gradient(180deg, rgba(11, 17, 32, 0.72) 0%, rgba(15, 23, 42, 0.84) 100%), url('/static/img/baby_face_bg.jpg?t=" + t + "')";
+            const av = document.getElementById('mainAppBabyAvatar');
+            if (av) av.src = '/static/icons/app-logo.png?t=' + t;
+            alert('✅ تم تطبيق صورة وجه الطفل بنجاح تام كخلفية وأيقونة للتطبيق!');
+        } else {
+            alert('حدث خطأ: ' + (data.error || 'فشل الرفع'));
+        }
+    })
+    .catch(err => {
+        toast.remove();
+        alert('فشل الاتصال بالخادم: ' + err);
+    });
+}
 </script>
-<!-- محرك التحكم الصوتي الذاتي الشامل للتطبيق -->
 <script src="/static/js/voice_commander.js"></script>
 </body>
 </html>

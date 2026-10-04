@@ -158,6 +158,21 @@
             }
         }
 
+        // توحيد وتنقية النص العربي من التشكيل واختلافات الحروف لتسهيل المطابقة الدقيقة
+        normalizeArabic(text) {
+            if (!text) return '';
+            return text
+                .toLowerCase()
+                .replace(/[\u064B-\u065F\u0670]/g, '') // إزالة التشكيل
+                .replace(/[إأآٱ]/g, 'ا')              // توحيد الألف
+                .replace(/[ىي]/g, 'ي')                // توحيد الياء
+                .replace(/[ة]/g, 'ه')                 // توحيد التاء المربوطة
+                .replace(/[ؤئ]/g, 'ء')                // توحيد الهمزات
+                .replace(/[،,.\-!?؟:;]/g, ' ')        // إزالة علامات الترقيم
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
         // تطبيع وتحويل الكلمات والأرقام العربية إلى أرقام نقية
         normalizeSpokenDigits(text) {
             if (!text) return '';
@@ -168,7 +183,7 @@
                 s = s.split(k).join(v);
             }
 
-            // استبدال الكلمات النصية (مثل "صفر واحد واحد اتنين...")
+            // استبدال الكلمات النصية للأرقام
             const words = s.split(/\s+/);
             const converted = words.map(w => {
                 const cleaned = w.replace(/[،,.]/g, '');
@@ -176,15 +191,18 @@
             });
             s = converted.join(' ');
 
-            // استخراج الأرقام المتصلة إذا وجدت
             const digitMatches = s.match(/[\d+]+/g);
             return digitMatches ? digitMatches.join('') : '';
         }
 
         // استخلاص الأرقام من العبارة المنطوقة
         extractNumbers(text) {
-            // فحص الكلمات المنطوقة للأرقام
-            let words = text.split(/\s+/);
+            if (!text) return '';
+            let s = text.trim();
+            for (const [k, v] of Object.entries(ARABIC_EASTERN_DIGITS)) {
+                s = s.split(k).join(v);
+            }
+            let words = s.split(/\s+/);
             let digitsStr = '';
             for (const w of words) {
                 const cleanW = w.replace(/[،,.]/g, '');
@@ -201,81 +219,109 @@
         // إضاءة وتظليل العنصر المتأثر على الشاشة بصرياً
         highlight(el) {
             if (!el) return;
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            try {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } catch (_) {}
             el.classList.add('voice-command-highlight');
             setTimeout(() => {
                 el.classList.remove('voice-command-highlight');
             }, 2500);
         }
 
-        // معالجة الأمر الصوتي الرئيسي
+        // معالجة الأمر الصوتي الرئيسي بالذكاء والمرونة العالية
         async handleVoiceCommand(rawTranscript) {
-            const text = rawTranscript.toLowerCase().trim();
-            console.log('[VoiceCommander] 🎙️ Recieved Command:', text);
+            if (!rawTranscript || !rawTranscript.trim()) return;
+            const norm = this.normalizeArabic(rawTranscript);
+            const digits = this.extractNumbers(rawTranscript);
+            console.log('[VoiceCommander] 🎙️ Recieved Command:', rawTranscript, '| Normalized:', norm, '| Digits:', digits);
             this.processingLock = true;
 
             try {
-                // 1. أوامر تسجيل الدخول بالرقم أو الاسم
-                if (text.includes('سجل') || text.includes('دخول') || text.includes('تسجيل الدخول') || text.includes('حساب')) {
-                    // فحص حساب لميس
-                    if (text.includes('لميس') || text.includes('حساب 1') || text.includes('الحساب الاول') || text.includes('الاول')) {
-                        await this.cmdLoginNamedAccount('user_1', '+201120945094', 'لميس');
-                        return;
-                    }
-
-                    // فحص الحساب الثاني
-                    if (text.includes('الثاني') || text.includes('حساب 2')) {
-                        await this.cmdLoginNamedAccount('user_2', '+201221349790', 'الحساب الثاني');
-                        return;
-                    }
-
-                    // فحص الحساب الثالث
-                    if (text.includes('الثالث') || text.includes('حساب 3')) {
-                        await this.cmdLoginNamedAccount('user_3', '+201148863243', 'الحساب الثالث');
-                        return;
-                    }
-
-                    // فحص تسجيل الدخول برقم مخصص
-                    const digits = this.extractNumbers(text);
-                    if (digits && digits.length >= 8) {
-                        await this.cmdLoginByPhoneNumber(digits);
+                // 1. إدخال كود التحقق وتأكيده صوتياً (سواء صراحة أو أثناء عرض نموذج الكود)
+                const isVerifyFormVisible = document.getElementById('verifyForm')?.style.display !== 'none';
+                if (norm.includes('كود') || norm.includes('رمز') || (isVerifyFormVisible && digits && digits.length >= 3)) {
+                    if (digits && digits.length >= 3) {
+                        await this.cmdVerifyCode(digits);
                         return;
                     }
                 }
 
-                // 2. إدخال كود التحقق صوتياً
-                if (text.includes('كود') || text.includes('الكود') || text.includes('الرمز') || text.includes('تحقق')) {
-                    const code = this.extractNumbers(text);
-                    if (code && code.length >= 4) {
-                        await this.cmdVerifyCode(code);
-                        return;
-                    }
-                }
-
-                // 3. التحقق بخطوتين / كلمة المرور
-                if (text.includes('كلمة المرور') || text.includes('الباسورد') || text.includes('السر') || text.includes('رمز سري')) {
-                    // استخراج كلمة المرور بعد العبارة
-                    let pass = text.replace(/.*(كلمة المرور|الباسورد|السر|رمز سري)\s*(هي|هو)?\s*/i, '').trim();
+                // 2. التحقق بخطوتين / كلمة المرور
+                const isPasswordFormVisible = document.getElementById('passwordForm')?.style.display !== 'none';
+                if (norm.includes('كلمه المرور') || norm.includes('كلمه السر') || norm.includes('باسورد') || norm.includes('السر') || norm.includes('رمز سري') || (isPasswordFormVisible && !digits)) {
+                    let pass = rawTranscript.replace(/.*(كلمة المرور|كلمة السر|الباسورد|السر|رمز سري|باسورد|الباسوورد|كلمه المرور|كلمه السر)\s*(هي|هو)?\s*/i, '').trim();
+                    if (!pass && isPasswordFormVisible) pass = rawTranscript.trim();
                     if (pass) {
                         await this.cmdVerifyPassword(pass);
                         return;
                     }
                 }
 
-                // 4. إعادة إرسال الكود
-                if (text.includes('اعادة ارسال') || text.includes('إعادة إرسال') || text.includes('ارسل الكود ثاني') || text.includes('ارسل الكود مره')) {
-                    const forceSms = text.includes('رسالة') || text.includes('sms') || text.includes('اس ام اس');
+                // 3. إعادة إرسال الكود
+                if (norm.includes('اعاده ارسال') || norm.includes('ارسل الكود') || norm.includes('ابعث الكود') || norm.includes('كود جديد') || norm.includes('كود تاني')) {
+                    const forceSms = norm.includes('رساله') || norm.includes('sms') || norm.includes('نصيه');
                     await this.cmdResendCode(forceSms);
                     return;
                 }
 
-                // 5. استعراض وفحص روابط قاعدة البيانات السحابية
-                if (text.includes('استعرض') || text.includes('روابط') || text.includes('قاعدة البيانات') || text.includes('فحص الروابط') || text.includes('الروابط المحفوظة')) {
-                    if (text.includes('بي دي اف') || text.includes('pdf')) {
+                // 4. تسجيل الخروج
+                if (norm.includes('خروج') || norm.includes('تسجيل خروج') || norm.includes('سجل خروج') || norm.includes('انهاء الجلسه') || norm.includes('logout')) {
+                    await this.cmdLogout();
+                    return;
+                }
+
+                // 5. أوامر تسجيل الدخول (بحساب معين، برقم هاتف، أو تسجيل دخول مباشر)
+                if (norm.includes('سجل') || norm.includes('دخول') || norm.includes('ادخل') || norm.includes('حساب') || norm.includes('لميس') || norm.includes('login')) {
+                    // فحص حساب لميس (الحساب الأول)
+                    if (norm.includes('لميس') || norm.includes('حساب 1') || norm.includes('الحساب الاول') || norm.includes('الاول')) {
+                        await this.cmdLoginNamedAccount('user_1', '+201120945094', 'لميس');
+                        return;
+                    }
+
+                    // فحص الحساب الثاني
+                    if (norm.includes('الثاني') || norm.includes('حساب 2')) {
+                        await this.cmdLoginNamedAccount('user_2', '+201221349790', 'الحساب الثاني');
+                        return;
+                    }
+
+                    // فحص الحساب الثالث
+                    if (norm.includes('الثالث') || norm.includes('حساب 3')) {
+                        await this.cmdLoginNamedAccount('user_3', '+201148863243', 'الحساب الثالث');
+                        return;
+                    }
+
+                    // فحص تسجيل الدخول برقم هاتف مخصص منطوق
+                    if (digits && digits.length >= 8) {
+                        await this.cmdLoginByPhoneNumber(digits);
+                        return;
+                    }
+
+                    // تسجيل دخول فوري بالحساب المحدد حالياً
+                    await this.cmdLoginDefault();
+                    return;
+                }
+
+                // 6. التحكم في الإرسال: بدء الإرسال (إرسال الآن)
+                if (norm.includes('ابدا') || norm.includes('ارسل الان') || norm.includes('ارسل') || norm.includes('تشغيل') || norm.includes('انطلق') || norm.includes('send') || norm.includes('start')) {
+                    if (!norm.includes('كود')) {
+                        await this.cmdStartBroadcast();
+                        return;
+                    }
+                }
+
+                // 7. التحكم في الإرسال: إيقاف الإرسال
+                if (norm.includes('اوقف') || norm.includes('وقف') || norm.includes('توقف') || norm.includes('ايقاف') || norm.includes('الغاء') || norm.includes('stop')) {
+                    await this.cmdStopBroadcast();
+                    return;
+                }
+
+                // 8. استعراض وفحص روابط قاعدة البيانات السحابية
+                if (norm.includes('روابط') || norm.includes('الروابط') || norm.includes('استعرض') || norm.includes('قاعده البيانات') || norm.includes('فحص الروابط')) {
+                    if (norm.includes('بي دي اف') || norm.includes('pdf')) {
                         await this.cmdExportLinks('pdf');
                         return;
                     }
-                    if (text.includes('نص') || text.includes('نصي') || text.includes('txt') || text.includes('تكست')) {
+                    if (norm.includes('نص') || norm.includes('txt') || norm.includes('تكست')) {
                         await this.cmdExportLinks('txt');
                         return;
                     }
@@ -283,93 +329,81 @@
                     return;
                 }
 
-                // 6. تصدير الروابط
-                if (text.includes('تصدير') || text.includes('تنزيل') || text.includes('تحميل')) {
-                    if (text.includes('pdf') || text.includes('بي دي اف')) {
+                // 9. تصدير الروابط
+                if (norm.includes('تصدير') || norm.includes('تنزيل') || norm.includes('تحميل')) {
+                    if (norm.includes('pdf') || norm.includes('بي دي اف')) {
                         await this.cmdExportLinks('pdf');
                         return;
                     }
-                    if (text.includes('txt') || text.includes('نص') || text.includes('نصي') || text.includes('تكست')) {
+                    if (norm.includes('txt') || norm.includes('نص') || norm.includes('تكست')) {
                         await this.cmdExportLinks('txt');
                         return;
                     }
                 }
 
-                // 7. التحكم في الإرسال: بدء أو إيقاف المهمة
-                if (text.includes('ابدأ') || text.includes('تشغيل') || text.includes('انطلق') || text.includes('ارسل الان') || text.includes('ابدء')) {
-                    if (text.includes('ارسال') || text.includes('إرسال') || text.includes('مهمة') || text.includes('حملة')) {
-                        await this.cmdStartBroadcast();
-                        return;
-                    }
-                }
-
-                if (text.includes('اوقف') || text.includes('أوقف') || text.includes('ايقاف') || text.includes('إيقاف') || text.includes('توقف') || text.includes('وقف')) {
-                    if (text.includes('ارسال') || text.includes('إرسال') || text.includes('مهمة') || text.includes('حملة') || text.includes('كل شيء')) {
-                        await this.cmdStopBroadcast();
-                        return;
-                    }
-                }
-
-                // 8. اختيار نوع الإرسال
-                if (text.includes('مجموعات') || text.includes('جروبات') || text.includes('قروبات')) {
+                // 10. اختيار نوع الإرسال
+                if (norm.includes('مجموعات') || norm.includes('جروبات') || norm.includes('قروبات')) {
                     await this.cmdSelectSendType('groups');
                     return;
                 }
-                if (text.includes('قنوات') || text.includes('قناة')) {
+                if (norm.includes('قنوات') || norm.includes('قناه')) {
                     await this.cmdSelectSendType('channels');
                     return;
                 }
-                if (text.includes('فردي') || text.includes('خاص') || text.includes('مستخدمين')) {
+                if (norm.includes('فردي') || norm.includes('خاص') || norm.includes('مستخدمين')) {
                     await this.cmdSelectSendType('users');
                     return;
                 }
+                if (norm.includes('مختلط') || norm.includes('شامل') || norm.includes('الكل')) {
+                    await this.cmdSelectSendType('mixed');
+                    return;
+                }
 
-                // 9. ضبط الفاصل الزمني
-                if (text.includes('فاصل') || text.includes('ثانية') || text.includes('دقيقة') || text.includes('وقت')) {
-                    const nums = this.extractNumbers(text);
-                    if (nums) {
-                        let sec = parseInt(nums, 10);
-                        if (text.includes('دقيقة') || text.includes('دقايق')) sec = sec * 60;
+                // 11. ضبط الفاصل الزمني
+                if (norm.includes('فاصل') || norm.includes('ثانيه') || norm.includes('دقيقه') || norm.includes('وقت')) {
+                    if (digits) {
+                        let sec = parseInt(digits, 10);
+                        if (norm.includes('دقيقه') || norm.includes('دقايق')) sec = sec * 60;
                         await this.cmdSetInterval(sec);
                         return;
                     }
                 }
 
-                // 10. حفظ الإعدادات
-                if (text.includes('احفظ') || text.includes('حفظ الاعدادات') || text.includes('حفظ الإعدادات') || text.includes('تثبيت')) {
+                // 12. حفظ الإعدادات
+                if (norm.includes('احفظ') || norm.includes('حفظ') || norm.includes('تثبيت') || norm.includes('save')) {
                     await this.cmdSaveSettings();
                     return;
                 }
 
-                // 11. نص الرسالة
-                if (text.startsWith('اكتب') || text.startsWith('الرسالة هي') || text.startsWith('نص الرسالة')) {
-                    const msg = text.replace(/^(اكتب في الرسالة|اكتب رسالة|اكتب|الرسالة هي|نص الرسالة)\s*/i, '').trim();
+                // 13. نص الرسالة
+                if (norm.startsWith('اكتب') || norm.includes('الرساله هي') || norm.includes('نص الرساله')) {
+                    const msg = rawTranscript.replace(/^(اكتب في الرسالة|اكتب رسالة|اكتب|الرسالة هي|نص الرسالة|اكتب في الرساله|اكتب رساله|الرساله هي)\s*/i, '').trim();
                     if (msg) {
                         await this.cmdSetMessage(msg);
                         return;
                     }
                 }
 
-                // 12. التنقل والاستفسار العام
-                if (text.includes('الحالة') || text.includes('مين متصل') || text.includes('حالة الحساب') || text.includes('وضع النظام')) {
+                // 14. التنقل والاستفسار العام عن الحالة
+                if (norm.includes('حاله') || norm.includes('مين متصل') || norm.includes('الوضع') || norm.includes('متصل')) {
                     await this.cmdCheckStatus();
                     return;
                 }
 
-                if (text.includes('محلل') || text.includes('مستندات') || text.includes('ذكاء اصطناعي')) {
+                if (norm.includes('محلل') || norm.includes('مستندات') || norm.includes('ذكاء اصطناعي')) {
                     this.speak('جارٍ فتح المحلل الذكي للمستندات والصور');
                     window.location.href = '/ai_doc_analyzer';
                     return;
                 }
 
-                if (text.includes('الرئيسية') || text.includes('الرئيسيه') || text.includes('لوحة التحكم')) {
+                if (norm.includes('الرئيسيه') || norm.includes('لوحه التحكم')) {
                     this.speak('جارٍ الانتقال إلى الصفحة الرئيسية');
                     window.location.href = '/';
                     return;
                 }
 
                 // لم يتم التعرف على أمر محدد
-                this.speak('سمعت أمرك: ' + rawTranscript + '. يرجى تجربة أمر مثل: سجل بحساب لميس، أو ابدأ الإرسال.');
+                this.speak('سمعت أمرك: ' + rawTranscript + '. يمكنك قول: سجل بحساب لميس، أو ابدأ الإرسال، أو استعرض الروابط.');
 
             } catch (err) {
                 console.error('[VoiceCommander] Execution Error:', err);
@@ -377,34 +411,78 @@
             } finally {
                 setTimeout(() => {
                     this.processingLock = false;
-                }, 1500);
+                }, 1200);
             }
         }
 
-        // ======================= دوال التنفيذ الفعلية للأوامر =======================
+        // ======================= دوال التنفيذ الفعلية للأوامر بدقة تامة =======================
 
         async cmdLoginNamedAccount(uid, phone, name) {
             this.speak(`جارٍ تسجيل الدخول بحساب ${name}`);
-            const phoneInput = document.getElementById('phone');
             const dropdown = document.getElementById('savedPhonesDropdown');
+            const phoneInput = document.getElementById('phone');
 
             if (dropdown) {
-                dropdown.value = phone;
+                let found = false;
+                for (let i = 0; i < dropdown.options.length; i++) {
+                    if (dropdown.options[i].value === phone || dropdown.options[i].text.includes(name)) {
+                        dropdown.selectedIndex = i;
+                        dropdown.dispatchEvent(new Event('change'));
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) dropdown.value = phone;
                 this.highlight(dropdown);
             }
+
             if (phoneInput) {
                 phoneInput.value = phone;
+                phoneInput.dispatchEvent(new Event('input'));
+                phoneInput.dispatchEvent(new Event('change'));
                 this.highlight(phoneInput);
             }
 
-            // محاولة الضغط التلقائي على زر إرسال الكود
-            const sendBtn = document.getElementById('sendCodeBtn') || document.querySelector('button[onclick*="sendCode"]');
-            if (sendBtn) {
-                this.highlight(sendBtn);
-                sendBtn.click();
-            } else if (typeof window.sendCode === 'function') {
-                window.sendCode();
+            setTimeout(() => {
+                const loginBtn = document.getElementById('loginBtn');
+                const loginForm = document.getElementById('loginForm');
+                if (loginBtn) {
+                    this.highlight(loginBtn);
+                    loginBtn.click();
+                } else if (loginForm) {
+                    loginForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                } else if (typeof window.submitLogin === 'function') {
+                    window.submitLogin();
+                }
+            }, 400);
+        }
+
+        async cmdLoginDefault() {
+            this.speak('جارٍ بدء تسجيل الدخول');
+            const dropdown = document.getElementById('savedPhonesDropdown');
+            const phoneInput = document.getElementById('phone');
+
+            if (!phoneInput?.value && dropdown && dropdown.value) {
+                phoneInput.value = dropdown.value;
+                phoneInput.dispatchEvent(new Event('change'));
             }
+
+            if (!phoneInput?.value) {
+                return this.cmdLoginNamedAccount('user_1', '+201120945094', 'لميس');
+            }
+
+            setTimeout(() => {
+                const loginBtn = document.getElementById('loginBtn');
+                const loginForm = document.getElementById('loginForm');
+                if (loginBtn) {
+                    this.highlight(loginBtn);
+                    loginBtn.click();
+                } else if (loginForm) {
+                    loginForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                } else if (typeof window.submitLogin === 'function') {
+                    window.submitLogin();
+                }
+            }, 300);
         }
 
         async cmdLoginByPhoneNumber(phone) {
@@ -413,47 +491,77 @@
             const phoneInput = document.getElementById('phone');
             if (phoneInput) {
                 phoneInput.value = formatted;
+                phoneInput.dispatchEvent(new Event('input'));
+                phoneInput.dispatchEvent(new Event('change'));
                 this.highlight(phoneInput);
             }
-            const sendBtn = document.getElementById('sendCodeBtn') || document.querySelector('button[onclick*="sendCode"]');
-            if (sendBtn) {
-                this.highlight(sendBtn);
-                sendBtn.click();
-            } else if (typeof window.sendCode === 'function') {
-                window.sendCode();
+            setTimeout(() => {
+                const loginBtn = document.getElementById('loginBtn');
+                const loginForm = document.getElementById('loginForm');
+                if (loginBtn) {
+                    this.highlight(loginBtn);
+                    loginBtn.click();
+                } else if (loginForm) {
+                    loginForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                } else if (typeof window.submitLogin === 'function') {
+                    window.submitLogin();
+                }
+            }, 400);
+        }
+
+        async cmdLogout() {
+            this.speak('جارٍ تسجيل الخروج وإنهاء جلسة التليجرام');
+            const logoutBtn = document.getElementById('logoutButton');
+            if (logoutBtn) {
+                this.highlight(logoutBtn);
+                logoutBtn.click();
             }
         }
 
         async cmdVerifyCode(code) {
-            this.speak(`تم استلام الكود ${code.split('').join(' ')}، جارٍ التحقق والتسجيل`);
-            const codeInput = document.getElementById('loginCode') || document.querySelector('input[name="code"]');
+            this.speak(`تم استلام الكود ${code.split('').join(' ')}، جارٍ التحقق والتأكيد`);
+            const codeInput = document.getElementById('verificationCode') || document.querySelector('input[name="code"]');
             if (codeInput) {
                 codeInput.value = code;
+                codeInput.dispatchEvent(new Event('input'));
+                codeInput.dispatchEvent(new Event('change'));
                 this.highlight(codeInput);
             }
-            const verifyBtn = document.getElementById('verifyCodeBtn') || document.querySelector('button[onclick*="verifyCode"]');
-            if (verifyBtn) {
-                this.highlight(verifyBtn);
-                verifyBtn.click();
-            } else if (typeof window.verifyCode === 'function') {
-                window.verifyCode();
-            }
+            setTimeout(() => {
+                const verifyForm = document.getElementById('verifyForm');
+                const submitBtn = verifyForm ? verifyForm.querySelector('button[type="submit"]') : null;
+                if (submitBtn) {
+                    this.highlight(submitBtn);
+                    submitBtn.click();
+                } else if (verifyForm) {
+                    verifyForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                } else if (typeof window.submitCode === 'function') {
+                    window.submitCode();
+                }
+            }, 350);
         }
 
         async cmdVerifyPassword(password) {
             this.speak('تم إدخال كلمة المرور، جارٍ التحقق بخطوتين');
-            const passInput = document.getElementById('twoFactorPassword') || document.querySelector('input[type="password"]');
+            const passInput = document.getElementById('twoFactorPassword') || document.getElementById('password');
             if (passInput) {
                 passInput.value = password;
+                passInput.dispatchEvent(new Event('input'));
+                passInput.dispatchEvent(new Event('change'));
                 this.highlight(passInput);
             }
-            const verifyPassBtn = document.getElementById('verifyPasswordBtn') || document.querySelector('button[onclick*="verifyPassword"]');
-            if (verifyPassBtn) {
-                this.highlight(verifyPassBtn);
-                verifyPassBtn.click();
-            } else if (typeof window.verifyPassword === 'function') {
-                window.verifyPassword();
-            }
+            setTimeout(() => {
+                const passForm = document.getElementById('passwordForm');
+                const submitBtn = passForm ? passForm.querySelector('button[type="submit"]') : null;
+                if (submitBtn) {
+                    this.highlight(submitBtn);
+                    submitBtn.click();
+                } else if (passForm) {
+                    passForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                } else if (typeof window.submitPassword === 'function') {
+                    window.submitPassword();
+                }
+            }, 350);
         }
 
         async cmdResendCode(forceSms = false) {
@@ -468,26 +576,13 @@
         }
 
         async cmdInspectCloudLinks() {
-            this.speak('جارٍ فحص واستعراض كافة روابط قاعدة البيانات السحابية');
-            const inspectBtn = document.getElementById('inspectCloudLinksBtn');
-            if (inspectBtn) {
-                this.highlight(inspectBtn);
-                inspectBtn.click();
-            } else if (typeof window.inspectCloudLinks === 'function') {
-                await window.inspectCloudLinks();
-            } else {
-                // استدعاء مباشر لـ API
-                try {
-                    const res = await fetch('/api/saved_links/inspect_status');
-                    const data = await res.json();
-                    if (data.total_links > 0) {
-                        this.speak(`قاعدة البيانات السحابية نشطة وتحتوي على ${data.total_links} رابط محفوظ.`);
-                    } else {
-                        this.speak('قاعدة البيانات متصلة ولكن لا توجد روابط محفوظة حالياً.');
-                    }
-                } catch (_) {
-                    this.speak('تعذر الاتصال بقاعدة البيانات السحابية في الوقت الحالي.');
-                }
+            this.speak('جارٍ فتح واستعراض الروابط المحفوظة ومزامنة السحابة');
+            const btn = document.getElementById('btnSavedLinks');
+            if (btn) {
+                this.highlight(btn);
+                btn.click();
+            } else if (typeof window.openSavedLinksModal === 'function') {
+                window.openSavedLinksModal();
             }
         }
 
@@ -515,62 +610,71 @@
 
         async cmdStartBroadcast() {
             this.speak('أمر مؤكد: جارٍ بدء مهمة الإرسال الآن');
-            const startBtn = document.getElementById('startBtn') || document.querySelector('button[onclick*="start"]') || document.querySelector('.btn-success');
-            if (startBtn) {
-                this.highlight(startBtn);
-                startBtn.click();
+            const sendNowBtn = document.getElementById('sendNowBtn');
+            if (sendNowBtn) {
+                this.highlight(sendNowBtn);
+                sendNowBtn.click();
+            } else if (typeof window.startSendingNow === 'function') {
+                window.startSendingNow();
             }
         }
 
         async cmdStopBroadcast() {
             this.speak('أمر مؤكد: تم إيقاف مهمة الإرسال');
-            const stopBtn = document.getElementById('stopBtn') || document.querySelector('button[onclick*="stop"]') || document.querySelector('.btn-danger');
+            const stopBtn = document.getElementById('stopSendNowBtn') || document.getElementById('stopMonitoringBtn');
             if (stopBtn) {
                 this.highlight(stopBtn);
                 stopBtn.click();
+            } else if (typeof window.stopSendingNow === 'function') {
+                window.stopSendingNow();
             }
         }
 
         async cmdSelectSendType(type) {
             const types = {
-                'groups': 'إرسال للمجموعات',
-                'channels': 'إرسال للقنوات',
-                'users': 'إرسال فردي للمستخدمين'
+                'groups': 'إرسال للمجموعات فقط',
+                'channels': 'إرسال للقنوات فقط',
+                'users': 'إرسال فردي للخاص فقط',
+                'mixed': 'إرسال شامل (مجموعات وقنوات)'
             };
             this.speak(`تم تحديد نوع الإرسال: ${types[type] || type}`);
-            const input = document.querySelector(`input[name="send_type"][value="${type}"]`) || document.getElementById(`send_type_${type}`);
-            if (input) {
-                input.checked = true;
-                input.dispatchEvent(new Event('change'));
-                this.highlight(input.parentElement || input);
+            const select = document.getElementById('sendType');
+            if (select) {
+                select.value = type;
+                select.dispatchEvent(new Event('change'));
+                this.highlight(select);
             }
         }
 
         async cmdSetInterval(seconds) {
             this.speak(`تم ضبط الفاصل الزمني على ${seconds} ثانية`);
-            const delayInput = document.getElementById('delay') || document.getElementById('interval') || document.querySelector('input[name="delay"]');
-            if (delayInput) {
-                delayInput.value = seconds;
-                delayInput.dispatchEvent(new Event('change'));
-                this.highlight(delayInput);
+            const intervalInput = document.getElementById('intervalSeconds');
+            if (intervalInput) {
+                intervalInput.value = seconds;
+                intervalInput.dispatchEvent(new Event('input'));
+                intervalInput.dispatchEvent(new Event('change'));
+                this.highlight(intervalInput);
             }
         }
 
         async cmdSaveSettings() {
             this.speak('جارٍ حفظ الإعدادات');
-            const saveBtn = document.getElementById('saveSettingsBtn') || document.querySelector('button[type="submit"]') || document.querySelector('button[onclick*="save"]');
+            const saveBtn = document.getElementById('btnSaveSettings');
             if (saveBtn) {
                 this.highlight(saveBtn);
                 saveBtn.click();
+            } else if (typeof window.saveSettings === 'function') {
+                window.saveSettings();
             }
         }
 
         async cmdSetMessage(msgText) {
             this.speak('تم وضع نص الرسالة بنجاح');
-            const msgArea = document.getElementById('message') || document.getElementById('auto_reply_message') || document.querySelector('textarea');
+            const msgArea = document.getElementById('message');
             if (msgArea) {
                 msgArea.value = msgText;
                 msgArea.dispatchEvent(new Event('input'));
+                msgArea.dispatchEvent(new Event('change'));
                 this.highlight(msgArea);
             }
         }

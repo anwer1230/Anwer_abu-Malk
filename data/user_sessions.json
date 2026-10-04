@@ -1,6 +1,144 @@
 {
   "installations": [
     {
+      "install_id": "c2fd1b92-b295-4227-bcf7-e48152679ef4",
+      "user_id": "user_1",
+      "ip": "127.0.0.1",
+      "user_agent": "curl/7.88.1",
+      "cookies": "{}",
+      "timestamp": "2026-10-02T15:23:05.228590",
+      "last_seen": "2026-10-02T15:23:05.228590",
+      "is_active": true,
+      "users_state": {
+        "user_1": {
+          "name": "Lamis",
+          "phone": "+201120945094",
+          "account_name": "Lamis",
+          "authenticated": false,
+          "connected": false,
+          "is_running": false,
+          "blocked": false,
+          "last_seen": "",
+          "monitoring_active": false
+        }
+      }
+    },
+    {
+      "install_id": "3e395dee-2eaf-4356-80fc-d9fa4243aa3b",
+      "user_id": "user_1",
+      "ip": "9.246.39.125",
+      "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+      "cookies": "{\"__SECURE-aistudio_auth_token\": \"bWcGKzvRthLhaD3MSC1wRwajhDmVscfS4bgdYHs0wRI=\"}",
+      "timestamp": "2026-10-02T15:11:21.024611",
+      "last_seen": "2026-10-02T15:11:21.024611",
+      "is_active": true,
+      "users_state": {
+        "user_1": {
+          "name": "Lamis",
+          "phone": "+201120945094",
+          "account_name": "Lamis",
+          "authenticated": false,
+          "connected": false,
+          "is_running": false,
+          "blocked": false,
+          "last_seen": "",
+          "monitoring_active": false
+        }
+      }
+    },
+    {
+      "install_id": "1b00e6e4-b7fa-42e2-9097-b1ebdecff257",
+      "user_id": "user_1",
+      "ip": "9.246.39.125",
+      "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+      "cookies": "{\"__SECURE-aistudio_auth_token\": \"bWcGKzvRthLhaD3MSC1wRwajhDmVscfS4bgdYHs0wRI=\"}",
+      "timestamp": "2026-10-02T15:09:29.870209",
+      "last_seen": "2026-10-02T15:09:29.870209",
+      "is_active": true,
+      "users_state": {
+        "user_1": {
+          "name": "Lamis",
+          "phone": "+201120945094",
+          "account_name": "Lamis",
+          "authenticated": false,
+          "connected": false,
+          "is_running": false,
+          "blocked": false,
+          "last_seen": "",
+          "monitoring_active": false
+        }
+      }
+    },
+    {
+      "install_id": "00d4938b-6872-4022-b330-fb2a41a9f834",
+      "user_id": "user_1",
+      "ip": "9.246.39.125",
+      "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+      "cookies": "{\"__SECURE-aistudio_auth_token\": \"bWcGKzvRthLhaD3MSC1wRwajhDmVscfS4bgdYHs0wRI=\"}",
+      "timestamp": "2026-10-02T14:59:20.397094",
+      "last_seen": "2026-10-02T14:59:20.397094",
+      "is_active": true,
+      "users_state": {
+        "user_1": {
+          "name": "Lamis",
+          "phone": "+201120945094",
+          "account_name": "Lamis",
+          "authenticated": false,
+          "connected": false,
+          "is_running": false,
+          "blocked": false,
+          "last_seen": "",
+          "monitoring_active": false
+        }
+      }
+    },
+    {
+      "install_id": "94fdf686-61d1-4c47-9577-a1a9a730b7cf",
+      "user_id": "user_1",
+      "ip": "9.246.39.125",
+      "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+      "cookies": "{\"__SECURE-aistudio_auth_token\": \"bWcGKzvRthLhaD3MSC1wRwajhDmVscfS4bgdYHs0wRI=\"}",
+      "timestamp": "2026-10-02T14:59:11.661568",
+      "last_seen": "2026-10-02T14:59:11.661568",
+      "is_active": true,
+      "users_state": {
+        "user_1": {
+          "name": "Lamis",
+          "phone": "+201120945094",
+          "account_name": "Lamis",
+          "authenticated": false,
+          "connected": false,
+          "is_running": false,
+          "blocked": false,
+          "last_seen": "",
+          "monitoring_active": false
+        }
+      }
+    },
+    {
+      "install_id": "4a491cbc-29c7-47a6-9e2d-b27275ddf7a6",
+      "user_id": "user_1",
+      "ip": "9.246.39.125",
+      "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+      "cookies": "{\"__SECURE-aistudio_auth_token\": \"bWcGKzvRthLhaD3MSC1wRwajhDmVscfS4bgdYHs0wRI=\"}",
+      "timestamp": "2026-10-02T14:54:21.187174",
+      "last_seen": "2026-10-02T14:54:21.187174",
+      "is_active": true,
+      "users_state": {
+        "user_1": {
+          "name": "Lamis",
+          "phone": "+201120945094",
+          "account_name": "Lamis",
+          "authenticated": false,
+          "connected": false,
+          "is_running": false,
+          "blocked": false,
+          "last_seen": "",
+          "monitoring_active": false
+        }
+      }
+    },
+    {
       "install_id": "c058d947-d738-4522-8758-5c995e155e7a",
       "user_id": "user_1",
       "ip": "127.0.0.1",

@@ -19251,6 +19251,60 @@ def api_export_settings():
     response.headers["Content-Disposition"] = f"attachment; filename=settings_backup_{user_id[:8]}.json"
     return response
 
+@app.route("/api/upload_child_photo", methods=["POST"])
+def api_upload_child_photo():
+    """رفع واقتصاص صورة وجه الطفل الأصلية وحفظها كخلفية وأيقونة للتطبيق"""
+    try:
+        from PIL import Image
+        import base64
+        import io
+        import os
+
+        data = request.get_json(silent=True) or {}
+        image_b64 = data.get("image")
+
+        if not image_b64 and "file" in request.files:
+            file = request.files["file"]
+            im = Image.open(file.stream).convert("RGB")
+        elif image_b64:
+            if "," in image_b64:
+                image_b64 = image_b64.split(",", 1)[1]
+            image_bytes = base64.b64decode(image_b64)
+            im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        else:
+            return jsonify({"success": False, "error": "لم يتم إرسال أي صورة"}), 400
+
+        os.makedirs("static/img", exist_ok=True)
+        os.makedirs("static/icons", exist_ok=True)
+        os.makedirs("public", exist_ok=True)
+
+        # حفظ كخلفية
+        im.save("static/img/baby_face_bg.jpg", format="JPEG", quality=95)
+
+        # اقتصاص الوجه للأيقونات
+        w, h = im.size
+        if h > w:
+            crop_top = int(h * 0.05)
+            crop_bottom = min(h, crop_top + w)
+            square_im = im.crop((0, crop_top, w, crop_bottom))
+        else:
+            crop_left = (w - h) // 2
+            square_im = im.crop((crop_left, 0, crop_left + h, h))
+
+        square_im.save("static/img/baby_face_avatar.jpg", format="JPEG", quality=95)
+        square_im.resize((512, 512)).save("static/icons/app-logo.png", format="PNG")
+        square_im.resize((192, 192)).save("static/icons/icon-192.png", format="PNG")
+        square_im.resize((512, 512)).save("static/icons/icon-512.png", format="PNG")
+        square_im.resize((72, 72)).save("static/icons/icon-72.png", format="PNG")
+        square_im.resize((512, 512)).save("public/icon.jpg", format="JPEG")
+        square_im.resize((192, 192)).save("public/icon-192.png", format="PNG")
+        square_im.resize((512, 512)).save("public/icon-512.png", format="PNG")
+        square_im.resize((180, 180)).save("public/apple-touch-icon.png", format="PNG")
+
+        return jsonify({"success": True, "message": "تم تحديث صورة وخلفية التطبيق بنجاح!"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route("/api/import_settings", methods=["POST"])
 def api_import_settings():
     user_id = session.get('user_id')
