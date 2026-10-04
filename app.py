@@ -4035,6 +4035,18 @@ class TelegramManager:
                         socketio.emit('log_update', {"message": "✅ تم تسجيل الدخول بنجاح"}, to=user_id)
                         socketio.emit('login_result', {"status": "success", "message": "✅ تم تسجيل الدخول"}, to=user_id)
                         log_user_event(user_id, 'INFO', "✅ تم تسجيل الدخول بنجاح (جلسة محفوظة)")
+
+                        def _fetch_real_name_on_existing(cm=client_manager, uid=user_id, p_num=phone_number):
+                            try:
+                                time.sleep(1)
+                                r_name = _mgr._fetch_account_name(uid)
+                                if r_name and p_num:
+                                    import firestore_sync
+                                    firestore_sync.update_phone_account_name(p_num, r_name)
+                                    socketio.emit('saved_phones_updated', {'phones': firestore_sync.get_saved_phone_numbers()})
+                            except Exception as _fe:
+                                logger.debug(f"Error updating name on existing session: {_fe}")
+                        _OSThread(target=_fetch_real_name_on_existing, daemon=True).start()
                         return
 
                     # إرسال كود التحقق
@@ -4127,6 +4139,13 @@ class TelegramManager:
                     _save_custom_accounts()
             except Exception:
                 pass
+            try:
+                if p_num and name and name not in ['حساب تليجرام', 'رقم أساسي']:
+                    import firestore_sync
+                    firestore_sync.update_phone_account_name(p_num, name)
+                    socketio.emit('saved_phones_updated', {'phones': firestore_sync.get_saved_phone_numbers()})
+            except Exception as _sync_err:
+                logger.debug(f"Sync phone name error in _fetch_account_name: {_sync_err}")
             try:
                 self._fetch_account_photo(user_id, me)
             except Exception as photo_err:
@@ -4258,6 +4277,15 @@ class TelegramManager:
             except Exception as _e_pname:
                 logger.warning(f"Could not update PREDEFINED_USERS name: {_e_pname}")
 
+            # تثبيت اسم الحساب الفعلي للرقم بشكل دائم وبث التحديث للقائمة
+            try:
+                if account_phone and account_name and account_name not in ['حساب تليجرام', 'رقم أساسي']:
+                    import firestore_sync
+                    firestore_sync.update_phone_account_name(account_phone, account_name)
+                    socketio.emit('saved_phones_updated', {'phones': firestore_sync.get_saved_phone_numbers()})
+            except Exception as _sync_err:
+                logger.debug(f"Sync phone name error in verify_code: {_sync_err}")
+
             login_payload = {
                 "logged_in": True,
                 "connected": True,
@@ -4380,6 +4408,15 @@ class TelegramManager:
                     _save_custom_accounts()
             except Exception as _e_pname:
                 logger.warning(f"Could not update PREDEFINED_USERS name: {_e_pname}")
+
+            # تثبيت اسم الحساب الفعلي للرقم بشكل دائم وبث التحديث للقائمة
+            try:
+                if account_phone and account_name and account_name not in ['حساب تليجرام', 'رقم أساسي']:
+                    import firestore_sync
+                    firestore_sync.update_phone_account_name(account_phone, account_name)
+                    socketio.emit('saved_phones_updated', {'phones': firestore_sync.get_saved_phone_numbers()})
+            except Exception as _sync_err:
+                logger.debug(f"Sync phone name error in verify_password: {_sync_err}")
 
             login_payload = {
                 'logged_in': True,
@@ -6243,6 +6280,12 @@ def index():
         }
 
     admin_ui_visible = session.get('admin_ui_visible', False)
+    try:
+        import firestore_sync
+        current_saved_phones = firestore_sync.get_saved_phone_numbers()
+    except Exception:
+        current_saved_phones = []
+
     response = render_template('index.html',
                           settings=settings,
                           connection_status=connection_status,
@@ -6251,7 +6294,8 @@ def index():
                           current_user=current_user,
                           predefined_users=PREDEFINED_USERS,
                           users_account_info=users_account_info,
-                          admin_ui_visible=admin_ui_visible)
+                          admin_ui_visible=admin_ui_visible,
+                          saved_phones=current_saved_phones)
 
     resp = make_response(response)
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
@@ -6720,9 +6764,29 @@ def api_add_saved_phone_number():
     try:
         import firestore_sync
         res = firestore_sync.save_phone_number(phone, label)
-        return jsonify({"success": True, "phone": res})
+        phones = firestore_sync.get_saved_phone_numbers()
+        socketio.emit('saved_phones_updated', {'phones': phones})
+        return jsonify({"success": True, "phone": res, "phones": phones})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route("/api/saved_phone_numbers/update_name", methods=["POST"])
+@app.route("/api/update_phone_account_name", methods=["POST"])
+def api_update_phone_account_name():
+    """تحديث اسم الحساب الفعلي للرقم وتثبيته بشكل دائم في الكاش والقائمة المنسدلة"""
+    data = request.json or {}
+    phone = data.get('phone') or data.get('phone_number')
+    account_name = data.get('account_name') or data.get('name') or data.get('label')
+    if not phone or not account_name:
+        return jsonify({"success": False, "error": "رقم الهاتف واسم الحساب مطلوبان"}), 400
+    try:
+        import firestore_sync
+        res = firestore_sync.update_phone_account_name(phone, account_name)
+        phones = firestore_sync.get_saved_phone_numbers()
+        socketio.emit('saved_phones_updated', {'phones': phones})
+        return jsonify({"success": True, "phone": res, "phones": phones})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/verify_code", methods=["POST"])
 def api_verify_code():
@@ -6766,6 +6830,15 @@ def api_verify_code():
             account_phone = USERS.get(user_id, {}).get('account_phone') or (load_settings(user_id) or {}).get('phone') or ''
             account_username = USERS.get(user_id, {}).get('account_username') or ''
             account_avatar = result.get("account_avatar") or USERS.get(user_id, {}).get('account_avatar')
+
+            # تثبيت اسم الحساب الفعلي للرقم بشكل دائم وبث التحديث للقائمة
+            if account_phone and account_name:
+                try:
+                    import firestore_sync
+                    firestore_sync.update_phone_account_name(account_phone, account_name)
+                    socketio.emit('saved_phones_updated', {'phones': firestore_sync.get_saved_phone_numbers()})
+                except Exception as _sync_e:
+                    logger.debug(f"Sync phone account name error: {_sync_e}")
 
             return jsonify({
                 "success": True,

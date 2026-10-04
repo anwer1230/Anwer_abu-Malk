@@ -84,8 +84,27 @@ def _clean_phone_digits(p):
     return re.sub(r'[^0-9]', '', str(p or ''))
 
 
+def _init_default_phones_from_cache():
+    """تحديث الأسماء الافتراضية بالأسماء الحقيقية المحفوظة في الكاش المحلي فور بدء التشغيل"""
+    try:
+        cached = _load_json_file(LOCAL_PHONES_CACHE_FILE, [])
+        for c in cached:
+            c_digits = _clean_phone_digits(c.get('phone_number'))
+            c_name = c.get('account_name') or c.get('label')
+            if c_name and not c_name.startswith('الحساب ') and c_name not in ['رقم أساسي', 'رقم محفوظ', 'حساب تليجرام']:
+                for d in DEFAULT_PHONE_NUMBERS:
+                    if _clean_phone_digits(d.get('phone_number')) == c_digits:
+                        d['label'] = c_name
+                        d['account_name'] = c_name
+    except Exception as e:
+        logger.debug(f"Init defaults error: {e}")
+
+
+_init_default_phones_from_cache()
+
+
 def _sanitize_phone_list(phones):
-    """تنقية وتحديث أسماء الحسابات للأرقام ومنع ظهور كلمة 'أساسي'"""
+    """تنقية وتحديث أسماء الحسابات للأرقام وتثبيت الأسماء الحقيقية ومنع ظهور كلمة 'أساسي'"""
     if not isinstance(phones, list):
         return [dict(x) for x in DEFAULT_PHONE_NUMBERS]
 
@@ -98,25 +117,26 @@ def _sanitize_phone_list(phones):
         entry = dict(item)
         raw_phone = entry.get('phone_number', '')
         digits = _clean_phone_digits(raw_phone)
-        cur_label = entry.get('label') or entry.get('account_name') or ''
+        cur_label = (entry.get('label') or entry.get('account_name') or '').strip()
 
-        # للرقم +201120945094 يثبت الاسم بشكل دائم ومؤكد كـ Lamis
-        if digits == '201120945094':
+        # إذا كان الحساب يملك اسماً حقيقياً مسجلاً وليس اسماً شكلياً، نحافظ عليه دائماً
+        if digits == '201120945094' and (not cur_label or cur_label in ['رقم أساسي', 'رقم محفوظ', 'حساب تليجرام']):
             entry['label'] = 'Lamis'
             entry['account_name'] = 'Lamis'
-        elif 'أساسي' in cur_label or not cur_label or cur_label == 'رقم محفوظ':
-            # استبدال كلمة أساسي بالاسم المعين للحساب أو اسم افتراضي
-            if digits in defaults_map:
-                entry['label'] = defaults_map[digits]['label']
-                entry['account_name'] = defaults_map[digits].get('account_name', entry['label'])
-            else:
-                entry['label'] = entry.get('account_name') or f"حساب {raw_phone}"
-        else:
+        elif cur_label and not cur_label.startswith('الحساب ') and cur_label not in ['رقم أساسي', 'رقم محفوظ', 'حساب تليجرام']:
+            entry['label'] = cur_label
             entry['account_name'] = cur_label
+        elif digits in defaults_map:
+            def_lbl = defaults_map[digits].get('label', f"حساب {raw_phone}")
+            entry['label'] = def_lbl
+            entry['account_name'] = defaults_map[digits].get('account_name', def_lbl)
+        else:
+            entry['label'] = entry.get('account_name') or f"حساب {raw_phone}"
+            entry['account_name'] = entry['label']
 
         result.append(entry)
 
-    # التأكد من وجود كافة الأرقام الأساسية في القائمة
+    # التأكد من وجود كافة الأرقام المعتمدة في القائمة
     existing_digits = {_clean_phone_digits(r.get('phone_number')) for r in result}
     for def_entry in DEFAULT_PHONE_NUMBERS:
         def_digits = _clean_phone_digits(def_entry['phone_number'])
@@ -195,6 +215,29 @@ def update_phone_account_name(phone, account_name):
             phones.append(updated_entry)
 
         _save_json_file(LOCAL_PHONES_CACHE_FILE, phones)
+
+        # تحديث القائمة الافتراضية لمنع أي ارتداد للأسماء القديمة
+        for d in DEFAULT_PHONE_NUMBERS:
+            if _clean_phone_digits(d.get('phone_number')) == target_digits:
+                d['label'] = clean_name
+                d['account_name'] = clean_name
+
+        # تحديث حسابات accounts.json إن وجد حساب بهذا الرقم
+        try:
+            acc_file = os.path.join(DATA_DIR, 'accounts.json')
+            if os.path.exists(acc_file):
+                with open(acc_file, 'r', encoding='utf-8') as af:
+                    accs = json.load(af)
+                changed = False
+                for uid, udata in accs.items():
+                    if isinstance(udata, dict) and _clean_phone_digits(udata.get('phone')) == target_digits:
+                        udata['name'] = clean_name
+                        changed = True
+                if changed:
+                    with open(acc_file, 'w', encoding='utf-8') as af:
+                        json.dump(accs, af, ensure_ascii=False, indent=2)
+        except Exception as _ae:
+            logger.debug(f"accounts.json sync error: {_ae}")
 
     logger.info(f"💾 تم تثبيت وتحديث اسم الحساب للرقم {clean_phone} -> '{clean_name}' محلياً")
 
