@@ -47,6 +47,7 @@
             this.processingLock = false;
             this.supported = false;
             this.currentState = 'idle'; // 'idle' | 'listening' | 'permission' | 'error' | 'disabled'
+            this.micPermissionGranted = false;
             this.init();
         }
 
@@ -87,6 +88,11 @@
 
                 // تشغيل الفحص الذاتي التشخيصي تلقائياً عند التهيئة
                 this.selfTest();
+
+                // فحص وعرض إشعار إذن الميكروفون للمستخدم فوراً للموافقة عليه
+                setTimeout(() => {
+                    this.checkAndPromptMicrophonePermission();
+                }, 600);
             } catch (err) {
                 console.error('[VoiceCommander] Failed to initialize SpeechRecognition:', err);
                 this.supported = false;
@@ -114,6 +120,7 @@
                 hasSpeechRecognition: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
                 hasSpeechSynthesis: Boolean(window.speechSynthesis),
                 hasMicrophone: hasMic,
+                micPermissionGranted: this.micPermissionGranted,
                 isInitialized: Boolean(this.recognition),
                 currentState: this.currentState || (this.isListening ? 'listening' : (this.supported ? 'idle' : 'error'))
             };
@@ -122,6 +129,194 @@
             console.log('🎙️ [VoiceCommander Self-Test Diagnostics Report]:', report);
             console.log('═══════════════════════════════════════════════════');
             return report;
+        }
+
+        // فحص حالة إذن الميكروفون وعرض الإشعار التفاعلي
+        async checkAndPromptMicrophonePermission() {
+            if (!this.supported) return;
+
+            if (navigator.permissions && navigator.permissions.query) {
+                try {
+                    const status = await navigator.permissions.query({ name: 'microphone' });
+                    console.log('[VoiceCommander] Microphone permission status:', status.state);
+                    if (status.state === 'granted') {
+                        this.micPermissionGranted = true;
+                        this.hideMicrophoneNotice();
+                        this.updateStateIndicator('idle', '🟢 جاهز');
+                        return;
+                    }
+                    status.onchange = () => {
+                        console.log('[VoiceCommander] Microphone permission changed to:', status.state);
+                        if (status.state === 'granted') {
+                            this.micPermissionGranted = true;
+                            this.hideMicrophoneNotice();
+                            this.updateStateIndicator('idle', '🟢 جاهز');
+                        } else if (status.state === 'denied') {
+                            this.updateStateIndicator('error', '🔴 تم الرفض');
+                        }
+                    };
+                } catch (e) {
+                    console.warn('[VoiceCommander] Permission query not supported:', e);
+                }
+            }
+
+            // إظهار إشعار الموافقة على الميكروفون إذا لم يكن مفعلاً بعد
+            if (!this.micPermissionGranted) {
+                this.showMicrophoneNotice();
+            }
+        }
+
+        // إظهار إشعار أنيق للمستخدم للموافقة على إذن الميكروفون
+        showMicrophoneNotice() {
+            if (document.getElementById('voiceMicPermissionNotice')) return;
+
+            const banner = document.createElement('div');
+            banner.id = 'voiceMicPermissionNotice';
+            banner.className = 'voice-mic-banner';
+            banner.innerHTML = `
+                <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="mic-pulse-circle">
+                            <i class="fas fa-microphone-alt fa-lg text-primary"></i>
+                        </div>
+                        <div class="text-end">
+                            <div class="fw-bold text-dark" style="font-size: 0.96rem;">
+                                🎙️ إشعار تفعيل إذن الميكروفون للتحكم الصوتي
+                            </div>
+                            <div class="text-secondary small mt-1">
+                                يرجى النقر على زر الموافقة للسماح للمتصفح باستخدام الميكروفون للأوامر الصوتية.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 me-auto">
+                        <button type="button" class="btn btn-primary btn-sm px-3 py-2 fw-bold rounded-pill shadow-sm" id="grantMicBtn">
+                            <i class="fas fa-check-circle me-1"></i> السماح بالميكروفون الآن
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm px-3 py-2 rounded-pill" id="dismissMicNoticeBtn">
+                            إغلاق
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(banner);
+
+            document.getElementById('grantMicBtn')?.addEventListener('click', async () => {
+                const btn = document.getElementById('grantMicBtn');
+                if (btn) {
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> جاري فتح نافذة الإذن...';
+                }
+                const res = await this.requestMicrophoneAccess(true);
+                if (res.success) {
+                    banner.innerHTML = `
+                        <div class="d-flex align-items-center justify-content-center gap-2 py-1 text-success fw-bold">
+                            <i class="fas fa-check-circle fa-lg"></i>
+                            <span>✅ تم منح إذن الميكروفون بنجاح! يمكنك الآن التحدث بأوامرك الصوتية بحرية.</span>
+                        </div>
+                    `;
+                    setTimeout(() => {
+                        this.hideMicrophoneNotice();
+                    }, 2800);
+                } else {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-redo me-1"></i> إعادة المحاولة';
+                    }
+                }
+            });
+
+            document.getElementById('dismissMicNoticeBtn')?.addEventListener('click', () => {
+                this.hideMicrophoneNotice();
+            });
+        }
+
+        hideMicrophoneNotice() {
+            const el = document.getElementById('voiceMicPermissionNotice');
+            if (el) {
+                el.style.opacity = '0';
+                el.style.transform = 'translate(-50%, -24px)';
+                el.style.transition = 'all 0.3s ease';
+                setTimeout(() => el.remove(), 320);
+            }
+        }
+
+        // طلب الإذن الفعلي للميكروفون من نافذة المتصفح الأصلية (Native Browser Prompt)
+        async requestMicrophoneAccess(autoStartRecognition = false) {
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('متصفحك لا يدعم طلب إذن الميكروفون عبر navigator.mediaDevices');
+                }
+                this.updateStateIndicator('permission', '🟡 ينتظر موافقتك...');
+                
+                // هذا السطر يُظهر نافذة المتصفح الأصلية الإلزامية "Allow Abu_Malk-Services to use your microphone"
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // فور منح الموافقة، نوقف التراكات حتى لا تظل لمبة التسجيل مشتعلة بدون داعٍ
+                stream.getTracks().forEach(track => track.stop());
+
+                console.log('[VoiceCommander] ✅ تم منح إذن الميكروفون من المتصفح بنجاح!');
+                this.micPermissionGranted = true;
+                this.hideMicrophoneNotice();
+                this.updateStateIndicator('idle', '🟢 جاهز');
+                this.speak('تم تفعيل إذن الميكروفون بنجاح! يمكنك الآن التحدث بأوامرك الصوتية.');
+                
+                if (autoStartRecognition) {
+                    setTimeout(() => {
+                        this.start();
+                    }, 300);
+                }
+                return { success: true };
+            } catch (err) {
+                console.warn('[VoiceCommander] Microphone permission rejected or failed:', err);
+                if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    this.updateStateIndicator('error', '🔴 تم رفض الإذن');
+                    this.showPermissionDeniedHelp();
+                } else {
+                    this.updateStateIndicator('error', '🔴 خطأ ميكروفون');
+                }
+                return { success: false, error: err };
+            }
+        }
+
+        // إظهار إرشادات واضحة في حال حظر الميكروفون مسبقاً
+        showPermissionDeniedHelp() {
+            if (document.getElementById('voicePermissionDeniedModal')) return;
+            const modal = document.createElement('div');
+            modal.id = 'voicePermissionDeniedModal';
+            modal.className = 'modal fade show';
+            modal.style.display = 'block';
+            modal.style.backgroundColor = 'rgba(0,0,0,0.6)';
+            modal.setAttribute('tabindex', '-1');
+            modal.innerHTML = `
+                <div class="modal-dialog modal-dialog-centered">
+                    <div class="modal-content shadow-lg border-0" style="border-radius: 16px; direction: rtl;">
+                        <div class="modal-header bg-warning text-dark">
+                            <h6 class="modal-title fw-bold">
+                                <i class="fas fa-exclamation-triangle me-2"></i> إذن الميكروفون محظور في المتصفح
+                            </h6>
+                            <button type="button" class="btn-close" onclick="document.getElementById('voicePermissionDeniedModal').remove()"></button>
+                        </div>
+                        <div class="modal-body p-4 text-secondary">
+                            <p class="mb-2 fw-semibold text-dark">
+                                تم حظر الوصول للميكروفون مسبقاً في إعدادات متصفحك لهذا الموقع.
+                            </p>
+                            <div class="p-3 bg-light rounded-3 border mb-3 small">
+                                <strong>خطوات إلغاء الحظر وتفعيل الميكروفون:</strong>
+                                <ol class="mb-0 mt-2 pe-3">
+                                    <li>انقر على أيقونة 🔒 (القفل) أو ⚙️ في شريط العناوين بالأعلى بجانب رابط الموقع.</li>
+                                    <li>ابحث عن <strong>الميكروفون (Microphone)</strong> واجعله <strong>السماح (Allow)</strong>.</li>
+                                    <li>أعد تحميل الصفحة، وسيعمل التحكم الصوتي فوراً.</li>
+                                </ol>
+                            </div>
+                        </div>
+                        <div class="modal-footer bg-light border-0 d-flex justify-content-between">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('voicePermissionDeniedModal').remove()">إغلاق</button>
+                            <button type="button" class="btn btn-primary btn-sm" onclick="window.location.reload()"><i class="fas fa-sync-alt me-1"></i> إعادة تحميل الصفحة</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
         }
 
         // إظهار تنبيه واضح ومباشر عند فتح التطبيق عبر HTTP غير الآمن
@@ -231,9 +426,11 @@
                 console.warn('[VoiceCommander] Speech Error:', e.error);
                 if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
                     this.shouldStayActive = false;
+                    this.micPermissionGranted = false;
                     this.currentState = 'error';
                     this.updateUIState(false);
                     this.updateStateIndicator('error', '🔴 رُفض الإذن');
+                    this.showPermissionDeniedHelp();
                     this.speak('يرجى السماح بصلاحية الميكروفون في المتصفح لتمكين التحكم الصوتي.');
                 } else if (e.error === 'no-speech') {
                     // وضع السكون الطبيعي عند عدم الكلام
@@ -904,15 +1101,18 @@
         // إدارة واجهة المستخدم الصوتية (UI & Interactivity)
         // ════════════════════════════════════════════════════════════
 
-        toggle() {
+        async toggle() {
             if (this.isListening) {
                 return this.stop();
             } else {
+                if (!this.micPermissionGranted) {
+                    return await this.requestMicrophoneAccess(true);
+                }
                 return this.start();
             }
         }
 
-        start() {
+        async start() {
             if (!this.supported) {
                 const reason = (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1')
                     ? 'التحكم الصوتي يتطلب تشغيل التطبيق عبر بروتوكول آمن HTTPS'
@@ -926,6 +1126,14 @@
             if (this.isListening) {
                 console.log('[VoiceCommander] Already listening.');
                 return { success: true, message: 'Already listening' };
+            }
+
+            // إذا لم يتم منح إذن الميكروفون بعد، نطلب الإذن الفعلي أولاً
+            if (!this.micPermissionGranted) {
+                const permRes = await this.requestMicrophoneAccess(false);
+                if (!permRes.success) {
+                    return permRes;
+                }
             }
 
             this.shouldStayActive = true;
@@ -1048,6 +1256,42 @@
             const style = document.createElement('style');
             style.id = 'voiceCommanderStyles';
             style.textContent = `
+                .voice-mic-banner {
+                    position: fixed;
+                    top: 18px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    z-index: 100000;
+                    background: #ffffff;
+                    border: 2px solid #0088cc;
+                    border-radius: 18px;
+                    padding: 14px 22px;
+                    max-width: 620px;
+                    width: calc(100% - 32px);
+                    box-shadow: 0 16px 40px rgba(0, 136, 204, 0.25), 0 6px 16px rgba(0,0,0,0.1);
+                    direction: rtl;
+                    animation: slideDownIn 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                }
+                @keyframes slideDownIn {
+                    from { opacity: 0; transform: translate(-50%, -24px); }
+                    to { opacity: 1; transform: translate(-50%, 0); }
+                }
+                .mic-pulse-circle {
+                    width: 44px;
+                    height: 44px;
+                    min-width: 44px;
+                    border-radius: 50%;
+                    background: rgba(0, 136, 204, 0.12);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    animation: micPulse 1.8s infinite;
+                }
+                @keyframes micPulse {
+                    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 136, 204, 0.4); }
+                    70% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(0, 136, 204, 0); }
+                    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 136, 204, 0); }
+                }
                 .floating-voice-hub {
                     position: fixed;
                     bottom: 24px;
