@@ -20,7 +20,7 @@ except ImportError:
 from app import app, socketio
 
 def free_port(port):
-    """تحرير المنفذ إذا كان مشغولاً (للبيئات المحلية فقط)"""
+    """تحرير المنفذ إذا كان مشغولاً بإنهاء أي عملية سابقة"""
     try:
         if os.environ.get('RENDER'):
             return
@@ -31,10 +31,26 @@ def free_port(port):
         result = s.connect_ex(('127.0.0.1', port))
         s.close()
         if result == 0:
-            import subprocess
-            subprocess.run(['fuser', '-k', f'{port}/tcp'], capture_output=True)
-            import time
-            time.sleep(1)
+            import os, signal, time
+            my_pid = os.getpid()
+            parent_pid = os.getppid()
+            for pid_dir in os.listdir('/proc'):
+                if not pid_dir.isdigit():
+                    continue
+                pid = int(pid_dir)
+                if pid == my_pid or pid == parent_pid:
+                    continue
+                try:
+                    with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                        cmd = f.read().replace(b'\x00', b' ').decode('utf-8', 'ignore')
+                    if 'python' in cmd and 'main.py' in cmd:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                except Exception:
+                    pass
+            time.sleep(0.5)
     except Exception:
         pass
 

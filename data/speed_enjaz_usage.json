@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-02",
+  "date": "2026-10-04",
   "daily_requests": 0,
   "daily_limit_est": 2000,
   "active_key_index": 4,
@@ -44,7 +44,12 @@
       "calls": 0,
       "errors": 0,
       "status": "active"
+    },
+    "env_key": {
+      "calls": 0,
+      "errors": 0,
+      "status": "active"
     }
   },
-  "last_reset": "2026-10-02T12:40:45.110325"
+  "last_reset": "2026-10-04T10:43:28.287415"
 }

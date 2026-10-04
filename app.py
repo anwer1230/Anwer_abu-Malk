@@ -19265,23 +19265,29 @@ def api_upload_child_photo():
 
         if not image_b64 and "file" in request.files:
             file = request.files["file"]
-            im = Image.open(file.stream).convert("RGB")
+            raw_bytes = file.read()
+            os.makedirs("static/img", exist_ok=True)
+            os.makedirs("static/icons", exist_ok=True)
+            os.makedirs("public", exist_ok=True)
+            # حفظ الملف الخام كما هو بدون أي تغيير أو ضغط
+            with open("static/img/baby_face_bg.jpg", "wb") as f_out:
+                f_out.write(raw_bytes)
+            im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         elif image_b64:
             if "," in image_b64:
                 image_b64 = image_b64.split(",", 1)[1]
-            image_bytes = base64.b64decode(image_b64)
-            im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            raw_bytes = base64.b64decode(image_b64)
+            os.makedirs("static/img", exist_ok=True)
+            os.makedirs("static/icons", exist_ok=True)
+            os.makedirs("public", exist_ok=True)
+            # حفظ الملف الخام كما هو بدون أي تغيير أو ضغط
+            with open("static/img/baby_face_bg.jpg", "wb") as f_out:
+                f_out.write(raw_bytes)
+            im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         else:
             return jsonify({"success": False, "error": "لم يتم إرسال أي صورة"}), 400
 
-        os.makedirs("static/img", exist_ok=True)
-        os.makedirs("static/icons", exist_ok=True)
-        os.makedirs("public", exist_ok=True)
-
-        # حفظ كخلفية
-        im.save("static/img/baby_face_bg.jpg", format="JPEG", quality=95)
-
-        # اقتصاص الوجه للأيقونات
+        # اقتصاص الوجه للأيقونات بجودة عالية ودقيقة
         w, h = im.size
         if h > w:
             crop_top = int(h * 0.05)
@@ -19291,15 +19297,15 @@ def api_upload_child_photo():
             crop_left = (w - h) // 2
             square_im = im.crop((crop_left, 0, crop_left + h, h))
 
-        square_im.save("static/img/baby_face_avatar.jpg", format="JPEG", quality=95)
-        square_im.resize((512, 512)).save("static/icons/app-logo.png", format="PNG")
-        square_im.resize((192, 192)).save("static/icons/icon-192.png", format="PNG")
-        square_im.resize((512, 512)).save("static/icons/icon-512.png", format="PNG")
-        square_im.resize((72, 72)).save("static/icons/icon-72.png", format="PNG")
-        square_im.resize((512, 512)).save("public/icon.jpg", format="JPEG")
-        square_im.resize((192, 192)).save("public/icon-192.png", format="PNG")
-        square_im.resize((512, 512)).save("public/icon-512.png", format="PNG")
-        square_im.resize((180, 180)).save("public/apple-touch-icon.png", format="PNG")
+        square_im.save("static/img/baby_face_avatar.jpg", format="JPEG", quality=100)
+        square_im.resize((512, 512), Image.Resampling.LANCZOS).save("static/icons/app-logo.png", format="PNG")
+        square_im.resize((192, 192), Image.Resampling.LANCZOS).save("static/icons/icon-192.png", format="PNG")
+        square_im.resize((512, 512), Image.Resampling.LANCZOS).save("static/icons/icon-512.png", format="PNG")
+        square_im.resize((72, 72), Image.Resampling.LANCZOS).save("static/icons/icon-72.png", format="PNG")
+        square_im.resize((512, 512), Image.Resampling.LANCZOS).save("public/icon-512.png", format="PNG")
+        square_im.resize((192, 192), Image.Resampling.LANCZOS).save("public/icon-192.png", format="PNG")
+        square_im.resize((512, 512), Image.Resampling.LANCZOS).save("public/icon.jpg", format="JPEG", quality=100)
+        square_im.resize((180, 180), Image.Resampling.LANCZOS).save("public/apple-touch-icon.png", format="PNG")
 
         return jsonify({"success": True, "message": "تم تحديث صورة وخلفية التطبيق بنجاح!"})
     except Exception as e:

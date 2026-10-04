@@ -50,10 +50,11 @@
     <!-- Android PWA -->
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="application-name" content="سرعة انجاز">
-    <link rel="icon" type="image/png" sizes="72x72"   href="/static/icons/app-logo.png">
-    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/app-logo.png">
-    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/app-logo.png">
-    <link rel="shortcut icon"         href="/static/icons/app-logo.png">
+    <link rel="icon" type="image/png" sizes="72x72"   href="/static/icons/icon-72.png?v=fixed">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png?v=fixed">
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png?v=fixed">
+    <link rel="apple-touch-icon" sizes="180x180"      href="/public/apple-touch-icon.png?v=fixed">
+    <link rel="shortcut icon"                         href="/static/icons/app-logo.png?v=fixed">
 
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -62,9 +63,7 @@
     <style>
         body {
             background-color: #0b1120;
-            background-image: 
-                linear-gradient(180deg, rgba(11, 17, 32, 0.72) 0%, rgba(15, 23, 42, 0.84) 100%),
-                url('/static/img/baby_face_bg.jpg');
+            background-image: url('/static/img/baby_face_bg.jpg?v=pure');
             background-attachment: fixed;
             background-position: center top;
             background-repeat: no-repeat;
@@ -1028,16 +1027,22 @@
             <div class="d-flex align-items-center justify-content-center mb-3">
                 <div class="position-relative">
                     <img id="mainAppBabyAvatar"
-                         src="/static/icons/app-logo.png?v=3" 
+                         src="/static/icons/app-logo.png?v=fixed" 
                          alt="صورة وجه الطفل" 
-                         style="width: 110px; height: 110px; border-radius: 50%; object-fit: cover; border: 3.5px solid #ffffff; box-shadow: 0 10px 30px rgba(0,0,0,0.5); transition: transform 0.3s ease;"
+                         style="width: 115px; height: 115px; border-radius: 50%; object-fit: cover; border: 4px solid #ffffff; box-shadow: 0 10px 30px rgba(0,0,0,0.5); transition: transform 0.3s ease;"
                          onmouseover="this.style.transform='scale(1.08)'" onmouseout="this.style.transform='scale(1)'">
                     <span class="position-absolute bottom-0 end-0 bg-success border border-white rounded-circle" style="width:20px;height:20px;box-shadow:0 0 8px #28a745;" title="نشط"></span>
-                    <label for="childPhotoInput" class="position-absolute bottom-0 start-0 bg-primary text-white border border-white rounded-circle d-flex align-items-center justify-content-center shadow" style="width:30px;height:30px;cursor:pointer;transition:transform 0.2s;" title="رفع واقتصاص صورة الطفل الأصلية فوراً" onmouseover="this.style.transform='scale(1.15)'" onmouseout="this.style.transform='scale(1)'">
-                        <i class="fas fa-camera" style="font-size:0.8rem;"></i>
+                    <label for="childPhotoInput" class="position-absolute bottom-0 start-0 bg-primary text-white border border-white rounded-circle d-flex align-items-center justify-content-center shadow" style="width:34px;height:34px;cursor:pointer;transition:transform 0.2s;" title="رفع واختيار صورتك الأصلية فوراً بدون فلاتر" onmouseover="this.style.transform='scale(1.15)'" onmouseout="this.style.transform='scale(1)'">
+                        <i class="fas fa-camera" style="font-size:0.9rem;"></i>
                     </label>
                     <input type="file" id="childPhotoInput" accept="image/*" style="display:none;" onchange="handleDirectChildPhotoUpload(this)">
                 </div>
+            </div>
+            <div class="text-center mb-3">
+                <button type="button" class="btn btn-sm btn-light shadow-sm fw-bold px-3 py-1 rounded-pill" onclick="document.getElementById('childPhotoInput').click()" style="border: 2px solid #3b82f6; color: #1e3a8a; font-size: 0.88rem;">
+                    <i class="fas fa-camera text-primary me-1"></i>
+                    تعيين صورتك الأصلية كخلفية وأيقونة (خام بدون أي فلاتر)
+                </button>
             </div>
 
             <h2 class="mb-3" style="position:relative;">
@@ -13413,16 +13418,15 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }).catch(() => {});
 });
-function handleDirectChildPhotoUpload(input) {
-    if (!input.files || !input.files[0]) return;
-    const file = input.files[0];
+function uploadPhotoFileDirectly(file) {
+    if (!file) return;
     const formData = new FormData();
     formData.append('file', file);
 
     const toast = document.createElement('div');
     toast.className = 'alert alert-info position-fixed top-0 start-50 translate-middle-x mt-3 shadow-lg';
     toast.style.zIndex = '999999';
-    toast.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i> جاري حفظ واقتصاص صورة وجه الطفل الأصلية وتطبيقها كخلفية وأيقونة...';
+    toast.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i> جاري حفظ صورتك الأصلية وتطبيقها كخلفية وأيقونة خام بدون أي تعديل...';
     document.body.appendChild(toast);
 
     fetch('/api/upload_child_photo', {
@@ -13434,10 +13438,10 @@ function handleDirectChildPhotoUpload(input) {
         toast.remove();
         if (data.success) {
             const t = Date.now();
-            document.body.style.backgroundImage = "linear-gradient(180deg, rgba(11, 17, 32, 0.72) 0%, rgba(15, 23, 42, 0.84) 100%), url('/static/img/baby_face_bg.jpg?t=" + t + "')";
+            document.body.style.backgroundImage = "url('/static/img/baby_face_bg.jpg?t=" + t + "')";
             const av = document.getElementById('mainAppBabyAvatar');
             if (av) av.src = '/static/icons/app-logo.png?t=' + t;
-            alert('✅ تم تطبيق صورة وجه الطفل بنجاح تام كخلفية وأيقونة للتطبيق!');
+            alert('✅ تم تطبيق صورتك الأصلية بنجاح كخلفية وأيقونة للتطبيق كما هي تماماً بدون أي تعديل أو فلاتر!');
         } else {
             alert('حدث خطأ: ' + (data.error || 'فشل الرفع'));
         }
@@ -13447,6 +13451,23 @@ function handleDirectChildPhotoUpload(input) {
         alert('فشل الاتصال بالخادم: ' + err);
     });
 }
+
+function handleDirectChildPhotoUpload(input) {
+    if (!input.files || !input.files[0]) return;
+    uploadPhotoFileDirectly(input.files[0]);
+}
+
+// دعم السحب والإفلات المباشر للصورة الأصلية على كامل نافذة التطبيق
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+        const file = e.dataTransfer.files[0];
+        if (file.type.startsWith('image/')) {
+            uploadPhotoFileDirectly(file);
+        }
+    }
+});
 </script>
 <script src="/static/js/voice_commander.js"></script>
 </body>
