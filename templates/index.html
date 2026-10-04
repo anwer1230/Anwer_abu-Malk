@@ -12245,7 +12245,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     window.handleStartMonitoring = handleStart;
     window.handleStopMonitoring = handleStop;
+    window.handleSendNow = handleSendNow;
+    window.handleScanGroupsAI = typeof handleScanGroupsAI !== 'undefined' ? handleScanGroupsAI : null;
     window.saveSettings = saveSettings;
+    window.settingsPayload = settingsPayload;
     async function handleSendNow() {
         const btn = byId('sendNowBtn');
         const origHtml = btn ? btn.innerHTML : '';
@@ -12399,6 +12402,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
     }
+    window.handleScanGroupsAI = handleScanGroupsAI;
     function bindSocket() {
         const socket = window.socket;
         if (!socket) { window.setTimeout(bindSocket, 300); return; }
@@ -12501,7 +12505,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         // ربط حدث زر إيقاف الإرسال
-        byId('stopSendNowBtn')?.addEventListener('click', async () => {
+        async function handleStopSendNow() {
             const sBtn = byId('stopSendNowBtn');
             if (sBtn) {
                 sBtn.disabled = true;
@@ -12510,10 +12514,20 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 const res = await requestJson('/api/send_now/stop', {});
                 window.showAlert('warning', res.message || 'تم إرسال إشارة إيقاف الإرسال');
+                return res;
             } catch (e) {
                 window.showAlert('danger', 'تعذر إيقاف الإرسال: ' + e.message);
                 if (sBtn) sBtn.disabled = false;
             }
+        }
+        window.handleStopSendNow = handleStopSendNow;
+        byId('stopSendNowBtn')?.addEventListener('click', handleStopSendNow);
+
+        byId('logoutButton')?.addEventListener('click', async () => {
+            try {
+                await fetch('/api/reset_login', { method: 'POST', credentials: 'same-origin' });
+                window.location.reload();
+            } catch(e) { console.error('Logout error:', e); }
         });
     }
     document.addEventListener('DOMContentLoaded', () => {

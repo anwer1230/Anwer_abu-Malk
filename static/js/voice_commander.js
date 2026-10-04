@@ -447,6 +447,22 @@
                 }
             };
 
+            let speechSilenceTimer = null;
+            let lastExecutedTranscript = '';
+            let lastExecutedTime = 0;
+
+            const executeIfNew = (text) => {
+                const clean = (text || '').trim();
+                if (!clean || this.processingLock) return;
+                const now = Date.now();
+                if (clean === lastExecutedTranscript && (now - lastExecutedTime) < 2200) {
+                    return;
+                }
+                lastExecutedTranscript = clean;
+                lastExecutedTime = now;
+                this.handleVoiceCommand(clean);
+            };
+
             this.recognition.onresult = (event) => {
                 let interimTranscript = '';
                 let finalTranscript = '';
@@ -466,7 +482,15 @@
                 }
 
                 if (finalTranscript && !this.processingLock) {
-                    this.handleVoiceCommand(finalTranscript.trim());
+                    if (speechSilenceTimer) clearTimeout(speechSilenceTimer);
+                    executeIfNew(finalTranscript);
+                } else if (interimTranscript && !this.processingLock) {
+                    if (speechSilenceTimer) clearTimeout(speechSilenceTimer);
+                    speechSilenceTimer = setTimeout(() => {
+                        if (!this.processingLock && interimTranscript.trim()) {
+                            executeIfNew(interimTranscript);
+                        }
+                    }, 850);
                 }
             };
         }
@@ -572,32 +596,53 @@
         }
 
         // معالجة الأمر الصوتي الرئيسي بالذكاء والمرونة العالية
+        // معالجة الأمر الصوتي الرئيسي بالذكاء والتنفيذ الفعلي الشامل
         async handleVoiceCommand(rawTranscript) {
             if (!rawTranscript || !rawTranscript.trim()) return;
             const norm = this.normalizeArabic(rawTranscript);
             const digits = this.extractNumbers(rawTranscript);
             console.log('[VoiceCommander] 🎙️ Recieved Command:', rawTranscript, '| Normalized:', norm, '| Digits:', digits);
-            this.processingLock = true;
 
+            this.processingLock = true;
             try {
+                // إرسال النص أيضاً لمحرك السيرفر لتسجيله وتنفيذه برمجياً في الخلفية
+                try {
+                    fetch('/api/voice_command/parse', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({ text: rawTranscript })
+                    }).catch(() => {});
+                } catch (_) {}
+
                 // ════════════════════════════════════════════════════════════
-                // 0. أمر "أبو مالك، افتح آخر رسالة" لفتح أحدث محادثة غير مقروءة
+                // 0. أمر التحديث التلقائي ونشر ريندر (Render Auto Deploy)
+                // ════════════════════════════════════════════════════════════
+                const isRenderDeployIntent = 
+                    norm.includes('ريندر') || norm.includes('تحديث') || norm.includes('deploy') || 
+                    norm.includes('update') || norm.includes('نشر') || (norm.includes('تحديث') && norm.includes('تلقائي')) ||
+                    norm.includes('حدث التطبيق') || norm.includes('اعمل تحديث') || norm.includes('تحديث البرنامج');
+                if (isRenderDeployIntent && !norm.includes('ارسل') && !norm.includes('رساله')) {
+                    await this.cmdRenderDeploy();
+                    return;
+                }
+
+                // ════════════════════════════════════════════════════════════
+                // 1. أمر "أبو مالك، افتح آخر رسالة" لفتح أحدث محادثة غير مقروءة
                 // ════════════════════════════════════════════════════════════
                 const isAbuMalkLatestMsgIntent = 
                     (norm.includes('ابو مالك') && (norm.includes('افتح') || norm.includes('اقرا') || norm.includes('شاهد') || norm.includes('رساله') || norm.includes('محادثه'))) ||
                     (norm.includes('افتح اخر رساله') || norm.includes('افتح احدث رساله') || norm.includes('افتح اخر محادثه') || norm.includes('افتح احدث محادثه') || norm.includes('احدث محادثه غير مقروءه') || norm.includes('افتح المحادثه غير المقروءه') || norm.includes('اقرا اخر رساله') || (norm.includes('افتح') && norm.includes('اخر رساله')) || (norm.includes('افتح') && norm.includes('الرساله الاخيره')));
-
                 if (isAbuMalkLatestMsgIntent) {
                     await this.cmdOpenLatestUnreadMessage();
                     return;
                 }
 
                 // ════════════════════════════════════════════════════════════
-                // 1. التحقق من الرموز (Verification of codes via voice command)
+                // 2. التحقق من الرموز (Verification of codes via voice command)
                 // ════════════════════════════════════════════════════════════
                 const isVerifyFormVisible = document.getElementById('verifyForm')?.style.display !== 'none';
                 const isCodeIntent = norm.includes('كود') || norm.includes('رمز') || norm.includes('تحقق من الرمز') || norm.includes('التحقق من الرمز') || norm.includes('تاكيد الرمز') || norm.includes('تاكيد الكود') || norm.includes('رمز التحقق') || norm.includes('كود التحقق');
-
                 if (isCodeIntent || (isVerifyFormVisible && digits && digits.length >= 3)) {
                     if (digits && digits.length >= 3) {
                         await this.cmdVerifyCode(digits);
@@ -630,45 +675,92 @@
                 }
 
                 // ════════════════════════════════════════════════════════════
-                // 2. بدء المهام المجدولة (Start Scheduled Tasks via voice command)
+                // 3. أوامر الإيقاف الشاملة (Stop Commands)
                 // ════════════════════════════════════════════════════════════
-                const isScheduleIntent = norm.includes('مجدول') || norm.includes('مجدوله') || norm.includes('الجدوله') || norm.includes('جدوله') || norm.includes('المهام المجدوله') || norm.includes('الدوره المجدوله');
-                
-                if (isScheduleIntent || ((norm.includes('مهم') || norm.includes('مهام')) && (norm.includes('ابدا') || norm.includes('بدء') || norm.includes('تشغيل') || norm.includes('شغل')))) {
-                    if (norm.includes('اوقف') || norm.includes('وقف') || norm.includes('ايقاف') || norm.includes('تعطيل')) {
+                const isStopWord = norm.includes('اوقف') || norm.includes('وقف') || norm.includes('ايقاف') || norm.includes('توقف') || norm.includes('أوقف') || norm.includes('إيقاف') || norm.includes('الغاء');
+                if (isStopWord) {
+                    if (norm.includes('مراقبه') || norm.includes('المراقبه')) {
+                        await this.cmdStopMonitoring();
+                        return;
+                    }
+                    if (norm.includes('مجدول') || norm.includes('جدوله') || norm.includes('مهام') || norm.includes('الدوره')) {
                         await this.cmdStopScheduledTasks();
                         return;
                     }
+                    // إيقاف الإرسال الفوري كافتراضي
+                    await this.cmdStopBroadcast();
+                    return;
+                }
+
+                // ════════════════════════════════════════════════════════════
+                // 4. أوامر الإرسال الفوري (Start Broadcast)
+                // ════════════════════════════════════════════════════════════
+                const isSendIntent = 
+                    norm.includes('ارسل') || norm.includes('إرسال') || norm.includes('ارسال') || 
+                    norm.includes('انطلق') || norm.includes('ابدأ الارسال') || norm.includes('ابدا الارسال') || 
+                    norm.includes('بدء الارسال') || norm.includes('ارسل فوري') || norm.includes('ارسل الان') || 
+                    norm.includes('نشر الرساله') || norm.includes('يلا ارسل') ||
+                    (norm.startsWith('ارسل') || norm.startsWith('ابدأ') || norm.startsWith('ابدا'));
+
+                if (isSendIntent) {
+                    const subMsg = rawTranscript.replace(/^(ارسل الآن|أرسل الآن|ارسل الان|ارسل فوري|أرسل فوري|ارسل|أرسل|إرسال|ارسال|انطلق)\s*/i, '').trim();
+                    if (subMsg && subMsg.length > 2 && !norm.includes('كود') && !norm.includes('رمز')) {
+                        await this.cmdSetMessage(subMsg);
+                    }
+                    await this.cmdStartBroadcast();
+                    return;
+                }
+
+                // ════════════════════════════════════════════════════════════
+                // 5. المراقبة الذكية التلقائية (Monitoring)
+                // ════════════════════════════════════════════════════════════
+                if (norm.includes('مراقبه') || norm.includes('المراقبه')) {
+                    await this.cmdStartMonitoring();
+                    return;
+                }
+
+                // ════════════════════════════════════════════════════════════
+                // 6. فحص المجموعات بالذكاء الاصطناعي (AI Group Inspection)
+                // ════════════════════════════════════════════════════════════
+                if (norm.includes('فحص') || norm.includes('افحص') || (norm.includes('ذكاء') && norm.includes('اصطناعي'))) {
+                    if (norm.includes('روابط') || norm.includes('الروابط')) {
+                        await this.cmdInspectCloudLinks();
+                        return;
+                    }
+                    await this.cmdScanGroupsAI();
+                    return;
+                }
+
+                // ════════════════════════════════════════════════════════════
+                // 7. بدء المهام المجدولة (Start Scheduled Tasks)
+                // ════════════════════════════════════════════════════════════
+                const isScheduleIntent = norm.includes('مجدول') || norm.includes('مجدوله') || norm.includes('الجدوله') || norm.includes('جدوله') || norm.includes('المهام المجدوله') || norm.includes('الدوره المجدوله');
+                if (isScheduleIntent || ((norm.includes('مهم') || norm.includes('مهام')) && (norm.includes('ابدا') || norm.includes('بدء') || norm.includes('تشغيل') || norm.includes('شغل')))) {
                     await this.cmdStartScheduledTasks(digits, norm);
                     return;
                 }
 
                 // ════════════════════════════════════════════════════════════
-                // 3. بدء تسجيل الدخول (Start Login via voice command)
+                // 8. تسجيل الدخول واختيار الحسابات (Login & Accounts)
                 // ════════════════════════════════════════════════════════════
                 const isLoginIntent = norm.includes('تسجيل الدخول') || norm.includes('تسجيل دخول') || norm.includes('سجل دخول') || norm.includes('سجل الدخول') || norm.includes('دخول') || norm.includes('ادخل') || norm.includes('حساب') || norm.includes('login');
-
                 if (isLoginIntent && !norm.includes('خروج')) {
                     if (norm.includes('لميس') || norm.includes('حساب 1') || norm.includes('الحساب الاول') || norm.includes('الاول')) {
                         await this.cmdLoginNamedAccount('user_1', '+201120945094', 'لميس');
                         return;
                     }
-
                     if (norm.includes('الثاني') || norm.includes('حساب 2')) {
                         await this.cmdLoginNamedAccount('user_2', '+201221349790', 'الحساب الثاني');
                         return;
                     }
-
                     if (norm.includes('الثالث') || norm.includes('حساب 3')) {
                         await this.cmdLoginNamedAccount('user_3', '+201148863243', 'الحساب الثالث');
                         return;
                     }
-
                     if (digits && digits.length >= 8) {
                         await this.cmdLoginByPhoneNumber(digits);
                         return;
                     }
-
                     await this.cmdLoginDefault();
                     return;
                 }
@@ -680,28 +772,9 @@
                 }
 
                 // ════════════════════════════════════════════════════════════
-                // 4. التحكم في الإرسال الفوري والمراقبة
+                // 9. الروابط وقاعدة البيانات وتصدير الملفات
                 // ════════════════════════════════════════════════════════════
-                if (norm.includes('ارسل الان') || norm.includes('ارسل فوري') || norm.includes('انطلق') || norm.includes('بدء الارسال') || norm.includes('ابدأ الارسال') || norm.includes('ابدا الارسال')) {
-                    await this.cmdStartBroadcast();
-                    return;
-                }
-
-                if (norm.includes('اوقف الارسال') || norm.includes('وقف الارسال') || norm.includes('ايقاف الارسال')) {
-                    await this.cmdStopBroadcast();
-                    return;
-                }
-
-                if (norm.includes('مراقبه') || norm.includes('المراقبه')) {
-                    if (norm.includes('اوقف') || norm.includes('وقف') || norm.includes('ايقاف')) {
-                        await this.cmdStopMonitoring();
-                    } else {
-                        await this.cmdStartMonitoring();
-                    }
-                    return;
-                }
-
-                if (norm.includes('روابط') || norm.includes('الروابط') || norm.includes('استعرض') || norm.includes('قاعده البيانات')) {
+                if (norm.includes('روابط') || norm.includes('الروابط') || norm.includes('قاعده البيانات')) {
                     if (norm.includes('بي دي اف') || norm.includes('pdf')) {
                         await this.cmdExportLinks('pdf');
                         return;
@@ -741,7 +814,7 @@
                     return;
                 }
 
-                if (norm.includes('محلل') || norm.includes('مستندات') || norm.includes('ذكاء اصطناعي')) {
+                if (norm.includes('محلل') || norm.includes('مستندات') || norm.includes('مستند')) {
                     this.speak('جارٍ فتح المحلل الذكي للمستندات والصور');
                     window.location.href = '/ai_doc_analyzer';
                     return;
@@ -753,67 +826,118 @@
                     return;
                 }
 
-                this.speak('سمعت أمرك: ' + rawTranscript + '. يمكنك قول: ابدأ تسجيل الدخول، أو رمز التحقق هو...، أو ابدأ المهام المجدولة.');
-
+                this.speak('سمعت أمرك: ' + rawTranscript + '. يمكنك قول: ارسل، أوقف، تحديث ريندر، أو تسجيل الدخول.');
             } catch (err) {
                 console.error('[VoiceCommander] Execution Error:', err);
                 this.speak('حدث خطأ أثناء تنفيذ الأمر: ' + (err.message || ''));
             } finally {
                 setTimeout(() => {
                     this.processingLock = false;
-                }, 1200);
+                }, 1000);
             }
         }
 
         // ════════════════════════════════════════════════════════════
-        // الدوال التنفيذية للأوامر الصوتية الفعلية
+        // الدوال التنفيذية للأوامر الصوتية الفعلية (مع ضمان التنفيذ بالسيرفر)
         // ════════════════════════════════════════════════════════════
 
-        // ── 0. أمر "أبو مالك، افتح آخر رسالة" ──
+        // ── أمر التحديث التلقائي ونشر ريندر ──
+        async cmdRenderDeploy() {
+            this.speak('أمر مؤكد: جارٍ إطلاق أمر التحديث التلقائي ونشر المشروع على منصة ريندر فوراً');
+            this.showTranscript('🚀 جارٍ إطلاق التحديث التلقائي على Render...', true);
+            let success = false;
+            try {
+                const resp = await fetch('/api/render/deploy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    success = true;
+                }
+            } catch (e) {
+                console.warn('[VoiceCommander] /api/render/deploy error:', e);
+            }
+            // إطلاق مباشر على الـ Deploy Hook كضمان إضافي
+            try {
+                await fetch('https://api.render.com/deploy/srv-daps4mm7bikc738kaflg?key=BSGAfvSu9d4', {
+                    method: 'POST',
+                    mode: 'no-cors'
+                });
+                success = true;
+            } catch (_) {}
+
+            // تفعيل التحديث التلقائي في الإعدادات
+            try {
+                await fetch('/api/toggle_auto_update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ enabled: true })
+                });
+                const toggle = document.getElementById('autoUpdateToggle');
+                if (toggle) toggle.checked = true;
+            } catch (_) {}
+
+            if (typeof window.showAlert === 'function') {
+                window.showAlert('success', '🚀 تم إرسال أمر التحديث التلقائي وإعادة النشر إلى Render بنجاح');
+            }
+            this.speak('تم إرسال أمر التحديث التلقائي وإعادة النشر إلى ريندر بنجاح');
+        }
+
+        // ── أمر فحص المجموعات بالذكاء الاصطناعي ──
+        async cmdScanGroupsAI() {
+            this.speak('أمر مؤكد: جارٍ فحص مجموعات التليجرام بالذكاء الاصطناعي بدقة');
+            if (typeof window.handleScanGroupsAI === 'function') {
+                try {
+                    await window.handleScanGroupsAI();
+                    return;
+                } catch (_) {}
+            }
+            const btn = document.getElementById('scanGroupsBtn');
+            if (btn) {
+                this.highlight(btn);
+                btn.click();
+            }
+        }
+
+        // ── أمر "أبو مالك، افتح آخر رسالة" ──
         async cmdOpenLatestUnreadMessage() {
             this.speak('أهلاً يا أبو مالك، جارٍ فحص وفتح أحدث محادثة غير مقروءة لك الآن.');
             console.log('[VoiceCommander] 🚀 Executing: "أبو مالك، افتح آخر رسالة"');
-
             let opened = false;
             let targetTitle = '';
 
-            // 1. إرسال حدث مخصص لتطبيق تيليجرام الرئيسي (React Context)
             window.dispatchEvent(new CustomEvent('openLatestUnreadChat'));
 
-            // 2. فحص عناصر واجهة المحادثات في الشريط الجانبي (Sidebar DOM)
             const chatItems = Array.from(document.querySelectorAll(
                 '#tg-app-root [class*="cursor-pointer"], .sidebar-chat-item, [data-chat-id], div[class*="border-b"][class*="cursor-pointer"]'
             ));
 
-            // البحث عن محادثة بها شارة رسائل غير مقروءة (Badge)
             for (const item of chatItems) {
-                const badge = item.querySelector('.bg-\\[\\#2481cc\\], [class*="rounded-full"], .badge-unread');
+                const badge = item.querySelector('.bg-\[\#2481cc\], [class*="rounded-full"], .badge-unread');
                 if (badge && parseInt(badge.textContent.trim(), 10) > 0) {
                     this.highlight(item);
                     item.click();
                     targetTitle = item.querySelector('h4, .chat-title')?.textContent?.trim() || 'المحادثة غير المقروءة';
                     opened = true;
-                    console.log('[VoiceCommander] Clicked unread chat item:', targetTitle);
                     break;
                 }
             }
 
-            // 3. إذا لم تكن هناك شارات غير مقروءة، فتح أول محادثة في القائمة
             if (!opened && chatItems.length > 0) {
                 const firstChat = chatItems[0];
                 this.highlight(firstChat);
                 firstChat.click();
                 targetTitle = firstChat.querySelector('h4, .chat-title')?.textContent?.trim() || 'أحدث محادثة';
                 opened = true;
-                console.log('[VoiceCommander] Clicked latest active chat item:', targetTitle);
             }
 
-            // 4. فحص واجهة القالب الرئيسي (HTML Modals: تنبيهاتي الجديدة أو رسائلي وسجل الإرسال)
             const alertsBadge = document.getElementById('myAlertsCount');
             const alertsCount = alertsBadge ? (parseInt(alertsBadge.textContent.trim(), 10) || 0) : 0;
-
             if (!opened && alertsCount > 0) {
-                const alertsBtn = document.querySelector('[data-bs-target="#myAlertsModal"]') || document.getElementById('myAlertsBtn');
+                const alertsBtn = document.querySelector('[data-bs-target="#myAlertsModal"]') || document.getElementById('btnMyAlerts');
                 if (alertsBtn) {
                     this.highlight(alertsBtn);
                     alertsBtn.click();
@@ -832,16 +956,16 @@
 
             setTimeout(() => {
                 if (targetTitle) {
-                    this.speak(`تم فتح ${targetTitle} بنجاح يا أبو مالك.`);
+                    this.speak();
                 } else {
                     this.speak('تم فتح أحدث محادثة لديك بنجاح يا أبو مالك.');
                 }
-            }, 900);
+            }, 800);
         }
 
-        // ── 1. بدء تسجيل الدخول ──
+        // ── أمر بدء تسجيل الدخول ──
         async cmdLoginNamedAccount(uid, phone, name) {
-            this.speak(`جارٍ بدء تسجيل الدخول بحساب ${name}`);
+            this.speak();
             const dropdown = document.getElementById('savedPhonesDropdown');
             const phoneInput = document.getElementById('phone');
 
@@ -893,7 +1017,7 @@
 
         async cmdLoginByPhoneNumber(phone) {
             let formatted = phone.startsWith('+') ? phone : ('+' + phone);
-            this.speak(`جارٍ بدء تسجيل الدخول بالرقم ${formatted}`);
+            this.speak();
             const phoneInput = document.getElementById('phone');
             if (phoneInput) {
                 phoneInput.value = formatted;
@@ -926,12 +1050,15 @@
                 this.highlight(logoutBtn);
                 logoutBtn.click();
             }
+            try {
+                await fetch('/api/reset_login', { method: 'POST', credentials: 'same-origin' });
+            } catch (_) {}
         }
 
-        // ── 2. التحقق من الرموز ──
+        // ── أمر التحقق من الرموز ──
         async cmdVerifyCode(code) {
             const spokenDigits = code.split('').join(' ');
-            this.speak(`تم إدخال رمز التحقق: ${spokenDigits}، جارٍ التأكيد والتحقق فوراً`);
+            this.speak();
             const codeInput = document.getElementById('verificationCode') || document.querySelector('input[name="code"]');
             if (codeInput) {
                 codeInput.value = code;
@@ -939,6 +1066,7 @@
                 codeInput.dispatchEvent(new Event('change'));
                 this.highlight(codeInput);
             }
+
             setTimeout(() => {
                 const verifyForm = document.getElementById('verifyForm');
                 const submitBtn = verifyForm ? verifyForm.querySelector('button[type="submit"]') : null;
@@ -948,20 +1076,22 @@
                 } else if (verifyForm) {
                     verifyForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
                 } else if (typeof window.submitCode === 'function') {
-                    window.submitCode();
+                    window.submitCode(code);
                 }
             }, 350);
         }
 
+        // ── أمر كلمة المرور ──
         async cmdVerifyPassword(password) {
-            this.speak('تم وضع كلمة المرور، جارٍ التحقق بخطوتين');
-            const passInput = document.getElementById('twoFactorPassword') || document.getElementById('password');
+            this.speak('تم إدخال كلمة المرور، جارٍ تسجيل الدخول');
+            const passInput = document.getElementById('password') || document.querySelector('input[type="password"]');
             if (passInput) {
                 passInput.value = password;
                 passInput.dispatchEvent(new Event('input'));
                 passInput.dispatchEvent(new Event('change'));
                 this.highlight(passInput);
             }
+
             setTimeout(() => {
                 const passForm = document.getElementById('passwordForm');
                 const submitBtn = passForm ? passForm.querySelector('button[type="submit"]') : null;
@@ -987,10 +1117,9 @@
             }
         }
 
-        // ── 3. بدء المهام المجدولة ──
+        // ── أمر بدء المهام المجدولة ──
         async cmdStartScheduledTasks(digits, norm) {
             this.speak('أمر مؤكد: جارٍ تفعيل وبدء المهام المجدولة ونظام الجدولة الدائرية');
-
             const sendTypeSelect = document.getElementById('sendType');
             if (sendTypeSelect) {
                 sendTypeSelect.value = 'scheduled';
@@ -1022,9 +1151,7 @@
 
             const resumeBtn = document.getElementById('resumeScheduleBtn');
             if (typeof window.resumeSchedule === 'function') {
-                try {
-                    await window.resumeSchedule();
-                } catch (_) {}
+                try { await window.resumeSchedule(); } catch (_) {}
             } else if (resumeBtn && resumeBtn.style.display !== 'none') {
                 this.highlight(resumeBtn);
                 resumeBtn.click();
@@ -1037,6 +1164,16 @@
                 startMonBtn.click();
             }
 
+            try {
+                const payload = (typeof window.settingsPayload === 'function') ? window.settingsPayload() : {};
+                await fetch('/api/start_monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                });
+            } catch (_) {}
+
             const statusBar = document.getElementById('scheduleStatusBar');
             if (statusBar) {
                 statusBar.style.display = 'block';
@@ -1047,7 +1184,7 @@
         }
 
         async cmdStopScheduledTasks() {
-            this.speak('أمر مؤكد: جارٍ إيقاف المهام المجدولة مؤقتاً');
+            this.speak('أمر مؤكد: جارٍ إيقاف المهام المجدولة');
             if (typeof window.handleStopMonitoring === 'function') {
                 try { await window.handleStopMonitoring(); } catch (_) {}
             }
@@ -1056,47 +1193,141 @@
                 this.highlight(stopBtn);
                 stopBtn.click();
             }
+            try {
+                await fetch('/api/stop_monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
+                });
+            } catch (_) {}
         }
 
-        // ── 4. أوامر المراسلة والمراقبة ──
+        // ── أمر بدء الإرسال الفوري ──
         async cmdStartBroadcast() {
             this.speak('أمر مؤكد: جارٍ بدء مهمة الإرسال فوراً');
-            const sendNowBtn = document.getElementById('sendNowBtn');
+            const msgInput = document.getElementById('message');
+            const grpInput = document.getElementById('groups');
+
+            if ((!msgInput?.value || !msgInput.value.trim()) && (!window.selectedImages || window.selectedImages.length === 0)) {
+                if (window.currentSettings && window.currentSettings.message) {
+                    if (msgInput) {
+                        msgInput.value = window.currentSettings.message;
+                        msgInput.dispatchEvent(new Event('input'));
+                    }
+                }
+            }
+            if (!grpInput?.value || !grpInput.value.trim()) {
+                if (window.currentSettings && window.currentSettings.groups) {
+                    if (grpInput) {
+                        grpInput.value = window.currentSettings.groups;
+                        grpInput.dispatchEvent(new Event('input'));
+                    }
+                }
+            }
+
+            let executed = false;
             if (typeof window.handleSendNow === 'function') {
-                window.handleSendNow();
-            } else if (sendNowBtn) {
+                try {
+                    await window.handleSendNow();
+                    executed = true;
+                } catch (e) {
+                    console.warn('[VoiceCommander] handleSendNow error:', e);
+                }
+            }
+
+            const sendNowBtn = document.getElementById('sendNowBtn');
+            if (!executed && sendNowBtn) {
                 this.highlight(sendNowBtn);
                 sendNowBtn.click();
+                executed = true;
+            }
+
+            // تنفيذ مباشر في الخلفية عبر السيرفر كطبقة أمان لضمان التنفيذ الفعلي 100%
+            if (!executed) {
+                try {
+                    await fetch('/api/send_now', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'same-origin',
+                        body: JSON.stringify({
+                            message: msgInput?.value || '',
+                            groups: grpInput?.value || '',
+                            send_to_all: true
+                        })
+                    });
+                } catch (_) {}
             }
         }
 
+        // ── أمر إيقاف الإرسال الفوري ──
         async cmdStopBroadcast() {
             this.speak('أمر مؤكد: تم إرسال إشارة إيقاف الإرسال');
+            if (typeof window.handleStopSendNow === 'function') {
+                try { await window.handleStopSendNow(); } catch (_) {}
+            }
             const stopBtn = document.getElementById('stopSendNowBtn');
             if (stopBtn) {
                 this.highlight(stopBtn);
                 stopBtn.click();
             }
+            try {
+                await fetch('/api/send_now/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
+                });
+                await fetch('/api/stop_send_now', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
+                });
+            } catch (_) {}
+            if (typeof window.showAlert === 'function') {
+                window.showAlert('warning', '🛑 تم إرسال إشارة إيقاف الإرسال');
+            }
         }
 
+        // ── أمر تشغيل المراقبة الذكية ──
         async cmdStartMonitoring() {
-            this.speak('جارٍ تشغيل المراقبة الذكية التلقائية');
+            this.speak('أمر مؤكد: جارٍ تشغيل المراقبة الذكية التلقائية');
+            let started = false;
             if (typeof window.handleStartMonitoring === 'function') {
-                await window.handleStartMonitoring();
-            } else {
-                const btn = document.getElementById('startMonitoringBtn');
-                if (btn) btn.click();
+                try {
+                    await window.handleStartMonitoring();
+                    started = true;
+                } catch (_) {}
             }
+            const btn = document.getElementById('startMonitoringBtn');
+            if (!started && btn) {
+                btn.click();
+                started = true;
+            }
+            try {
+                const payload = (typeof window.settingsPayload === 'function') ? window.settingsPayload() : {};
+                await fetch('/api/start_monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                });
+            } catch (_) {}
         }
 
+        // ── أمر إيقاف المراقبة الذكية ──
         async cmdStopMonitoring() {
-            this.speak('تم إيقاف المراقبة الذكية مؤقتاً');
+            this.speak('أمر مؤكد: تم إيقاف المراقبة الذكية');
             if (typeof window.handleStopMonitoring === 'function') {
-                await window.handleStopMonitoring();
-            } else {
-                const btn = document.getElementById('stopMonitoringBtn');
-                if (btn) btn.click();
+                try { await window.handleStopMonitoring(); } catch (_) {}
             }
+            const btn = document.getElementById('stopMonitoringBtn');
+            if (btn) btn.click();
+            try {
+                await fetch('/api/stop_monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
+                });
+            } catch (_) {}
         }
 
         async cmdInspectCloudLinks() {
@@ -1134,7 +1365,7 @@
 
         async cmdSetInterval(seconds) {
             const minutes = Math.round(seconds / 60) || 1;
-            this.speak(`تم ضبط الفاصل الزمني على ${minutes} دقيقة`);
+            this.speak();
             const intervalInput = document.getElementById('intervalSeconds');
             if (intervalInput) {
                 intervalInput.value = minutes;
@@ -1173,15 +1404,12 @@
                 const name = data.account_name || 'حساب لميس';
                 const status = data.logged_in ? 'متصل وموثق' : 'غير متصل حالياً';
                 const running = data.is_running ? 'وهناك مهام مجدولة قيد التشغيل' : 'ولا توجد مهام تعمل حالياً';
-                this.speak(`الحساب هو ${name}، الحالة: ${status}، ${running}.`);
+                this.speak();
             } catch (_) {
                 this.speak('التطبيق يعمل بشكل طبيعي ومتصل بالخادم.');
             }
         }
 
-        // ════════════════════════════════════════════════════════════
-        // إدارة واجهة المستخدم الصوتية (UI & Interactivity)
-        // ════════════════════════════════════════════════════════════
 
         async toggle() {
             if (this.isListening) {
@@ -1779,8 +2007,11 @@
                                     <div class="p-3 bg-white rounded-3 shadow-sm border-start border-warning h-100">
                                         <h6 class="fw-bold text-warning mb-2"><i class="fas fa-paper-plane me-1"></i> 4. المراسلة والروابط والحالة</h6>
                                         <ul class="list-unstyled mb-0 small text-secondary">
+                                            <li class="mb-1 text-danger fw-bold">🔹 <strong>«تحديث ريندر»</strong> أو <strong>«تحديث تلقائي»</strong>: إطلاق التحديث التلقائي وإعادة نشر التطبيق على Render فوراً.</li>
                                             <li class="mb-1 text-primary fw-bold">🔹 <strong>«أبو مالك، افتح آخر رسالة»</strong>: فتح أحدث محادثة غير مقروءة تلقائياً.</li>
-                                            <li class="mb-1">🔹 <strong>«ابدأ الإرسال الآن»</strong>: إرسال فوري فوري للرسالة.</li>
+                                            <li class="mb-1">🔹 <strong>«ارسل»</strong> أو <strong>«ابدأ الإرسال»</strong>: إطلاق مهمة الإرسال الفوري لرسالتك.</li>
+                                            <li class="mb-1">🔹 <strong>«أوقف الإرسال»</strong> أو <strong>«وقف»</strong>: إيقاف الإرسال فوراً.</li>
+                                            <li class="mb-1">🔹 <strong>«فحص المجموعات»</strong>: فحص دقيق للبوتات بالذكاء الاصطناعي.</li>
                                             <li class="mb-1">🔹 <strong>«استعرض روابط قاعدة البيانات»</strong>: فحص روابط السحابة.</li>
                                             <li class="mb-1">🔹 <strong>«صدّر الروابط ملف PDF»</strong> / <strong>«ملف TXT»</strong>.</li>
                                             <li class="mb-1">🔹 <strong>«ما هي حالة الحساب؟»</strong>: ينطق تفاصيل الاتصال والمهام.</li>

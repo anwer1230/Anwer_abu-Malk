@@ -1130,8 +1130,8 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 os.environ.setdefault('GROQ_API_KEY', GROQ_API_KEY)
 
 GITHUB_TOKEN  = os.environ.get('GITHUB_TOKEN', '')
-GITHUB_REPO   = os.environ.get('GITHUB_REPO',   'anwer1230/Anwer_Telegram-')
-GITHUB_BRANCH = os.environ.get('GITHUB_BRANCH', 'main')
+GITHUB_REPO   = os.environ.get('GITHUB_REPO',   'anwer1230/Anwer_abu-Malk')
+GITHUB_BRANCH = os.environ.get('GITHUB_BRANCH', 'master')
 
 # ── رابط النشر التلقائي الثابت Render Deploy Hook ─────────────────────
 RENDER_DEPLOY_HOOK_URL = "https://api.render.com/deploy/srv-daps4mm7bikc738kaflg?key=BSGAfvSu9d4"
@@ -1160,7 +1160,7 @@ def load_update_settings():
                 return json.load(f)
     except Exception:
         pass
-    return {"auto_update": False, "last_check": None, "last_update": None}
+    return {"auto_update": True, "last_check": None, "last_update": None}
 
 def save_update_settings(settings):
     try:
@@ -1183,12 +1183,12 @@ def get_current_commit():
 
 def get_latest_commit():
     try:
-        repo = GITHUB_REPO or "anwer1230/-Anwer_program"
+        repo = GITHUB_REPO or "anwer1230/Anwer_abu-Malk"
         if '/' in repo:
             owner, name = repo.split('/', 1)
         else:
             owner, name = "anwer1230", repo
-        url = f"https://api.github.com/repos/{owner}/{name}/commits/{GITHUB_BRANCH or 'main'}"
+        url = f"https://api.github.com/repos/{owner}/{name}/commits/{GITHUB_BRANCH or 'master'}"
         headers = {}
         if GITHUB_TOKEN:
             headers['Authorization'] = f'token {GITHUB_TOKEN}'
@@ -7700,6 +7700,7 @@ def api_pre_send_scan():
 
 
 @app.route("/api/send_now/stop", methods=["POST"])
+@app.route("/api/stop_send_now", methods=["POST"])
 def api_send_now_stop():
     """إيقاف لطيف لعملية الإرسال الفوري الجارية للمستخدم"""
     req_data = request.get_json(silent=True) or {}
@@ -8495,7 +8496,7 @@ def api_get_all_accounts_info():
 
 @app.route("/api/voice_command/parse", methods=["POST"])
 def api_voice_command_parse():
-    """محرك السيرفر لتحليل الأوامر الصوتية واستخراج النوايا والبيانات"""
+    """محرك السيرفر لتحليل الأوامر الصوتية واستخراج النوايا وتنفيذها فعلياً"""
     try:
         data = request.get_json(silent=True) or {}
         text = (data.get("text") or "").strip().lower()
@@ -8503,38 +8504,91 @@ def api_voice_command_parse():
             return jsonify({"success": False, "message": "لا يوجد نص أمر صوتي"})
 
         import re
-        # استخراج الأرقام
         raw_digits = re.findall(r'\d+', text)
         digits_str = "".join(raw_digits)
 
-        # تصنيف النوايا
         intent = "unknown"
         payload = {}
+        action_msg = ""
 
-        if any(w in text for w in ['سجل', 'دخول', 'تسجيل', 'حساب']):
+        user_id = resolve_request_user_id(data)
+        if not user_id:
+            user_id = session.get('user_id')
+
+        # 1. أمر التحديث التلقائي ونشر ريندر
+        if any(w in text for w in ['تحديث', 'ريندر', 'deploy', 'update', 'نشر']) and not any(w in text for w in ['ارسل', 'رسالة', 'رساله']):
+            intent = "render_deploy"
+            dep_ok, dep_stat = trigger_render_deploy()
+            try:
+                upd_settings = load_update_settings()
+                upd_settings['auto_update'] = True
+                save_update_settings(upd_settings)
+                start_auto_update_thread()
+            except Exception:
+                pass
+            action_msg = f"تم إطلاق التحديث التلقائي وإعادة النشر على Render (كود {dep_stat})"
+
+        # 2. أمر إيقاف الإرسال أو المراقبة أو الجدولة
+        elif any(w in text for w in ['اوقف', 'أوقف', 'ايقاف', 'إيقاف', 'توقف', 'وقف', 'الغاء']):
+            if any(w in text for w in ['مراقبه', 'المراقبه']):
+                intent = "stop_monitoring"
+                if user_id:
+                    with USERS_LOCK:
+                        if user_id in USERS:
+                            USERS[user_id]['is_running'] = False
+                action_msg = "تم إيقاف المراقبة الذكية"
+            elif any(w in text for w in ['مجدول', 'مهام', 'جدوله', 'الدوره']):
+                intent = "stop_scheduled"
+                if user_id:
+                    with USERS_LOCK:
+                        if user_id in USERS:
+                            USERS[user_id]['is_running'] = False
+                action_msg = "تم إيقاف المهام المجدولة"
+            else:
+                intent = "stop_broadcast"
+                if user_id and user_id in BATCH_CANCEL_EVENTS:
+                    BATCH_CANCEL_EVENTS[user_id].set()
+                action_msg = "تم إرسال إشارة إيقاف الإرسال الفوري"
+
+        # 3. أمر بدء الإرسال الفوري
+        elif any(w in text for w in ['ارسل', 'إرسال', 'ارسال', 'نشر', 'انطلق']):
+            intent = "start_broadcast"
+            action_msg = "تم استلام أمر بدء الإرسال الفوري"
+
+        # 4. أمر المراقبة
+        elif any(w in text for w in ['مراقبه', 'المراقبه']):
+            intent = "start_monitoring"
+            action_msg = "تم استلام أمر تشغيل المراقبة الذكية"
+
+        # 5. أمر الجدولة
+        elif any(w in text for w in ['مجدول', 'مهام', 'جدوله']):
+            intent = "start_scheduled"
+            action_msg = "تم استلام أمر تشغيل المهام المجدولة"
+
+        # 6. تسجيل الدخول
+        elif any(w in text for w in ['سجل', 'دخول', 'تسجيل', 'حساب']):
             intent = "login"
             if 'لميس' in text or 'user_1' in text or 'الاول' in text or 'الأول' in text:
                 payload = {"target_account": "user_1", "phone": "+201120945094", "name": "Lamis"}
             elif 'الثاني' in text:
                 payload = {"target_account": "user_2", "phone": "+201221349790", "name": "الحساب الثاني"}
+            elif 'الثالث' in text:
+                payload = {"target_account": "user_3", "phone": "+201148863243", "name": "الحساب الثالث"}
             elif digits_str:
                 p = "+" + digits_str if not digits_str.startswith('+') else digits_str
                 payload = {"phone": p}
 
+        # 7. الكود
         elif any(w in text for w in ['كود', 'الكود', 'الرمز', 'رمز']):
             intent = "verify_code"
             payload = {"code": digits_str}
 
+        # 8. كلمة المرور
         elif any(w in text for w in ['باسورد', 'كلمة المرور', 'السر']):
             intent = "verify_password"
 
-        elif any(w in text for w in ['ابدأ', 'تشغيل', 'انطلق']) and any(w in text for w in ['ارسال', 'إرسال', 'مهمة']):
-            intent = "start_broadcast"
-
-        elif any(w in text for w in ['اوقف', 'أوقف', 'ايقاف', 'إيقاف', 'توقف']):
-            intent = "stop_broadcast"
-
-        elif any(w in text for w in ['استعرض', 'فحص', 'روابط']):
+        # 9. فحص المجموعات والروابط
+        elif any(w in text for w in ['فحص', 'افحص', 'استعرض', 'روابط', 'مجموعات']):
             intent = "inspect_links"
 
         elif 'pdf' in text or 'بي دي اف' in text:
@@ -8547,6 +8601,7 @@ def api_voice_command_parse():
             "success": True,
             "intent": intent,
             "payload": payload,
+            "message": action_msg,
             "text": text
         })
     except Exception as e:
