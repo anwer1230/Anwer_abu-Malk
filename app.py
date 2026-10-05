@@ -2864,26 +2864,51 @@ class TelegramClientManager:
                         if send_dm and not event.is_private:
                             dm_sent = False
 
-                            # أولوية 1: استخدام input_sender من الحدث (يحتوي على access_hash حقيقي وموثق)
+                            # أولوية 1: محاولة إرسال الرد كاقتباس مباشر للرسالة الأصلية (Cross-chat Quote)
                             try:
-                                input_sender = await event.get_input_sender()
-                                if input_sender:
-                                    await self.client.send_message(input_sender, reply_text)
-                                    dm_sent = True
-                                    logger.info(f"✅ تم إرسال الرسالة بالخاص لـ @{target_clean} عبر input_sender")
-                            except FloodWaitError as dm_fwe:
-                                dm_wait = int(getattr(dm_fwe, 'seconds', 10) or 10)
-                                async def _delayed_dm_input(inp_s, rep_t, w_secs, u_name):
-                                    await asyncio.sleep(w_secs + 2)
-                                    try:
-                                        await self.client.send_message(inp_s, rep_t)
-                                        logger.info(f"✅ تم إرسال DM المؤجل لـ @{u_name}")
-                                    except Exception as err:
-                                        logger.warning(f"تعذر DM المؤجل: {err}")
-                                asyncio.create_task(_delayed_dm_input(input_sender, reply_text, dm_wait, target_clean))
+                                group_peer = await self.client.get_input_entity(event.chat_id)
+                                user_peer = await self.client.get_input_entity(input_sender or sender or target_uid or f"@{target_clean}")
+                                q_text = (getattr(message, 'text', '') or getattr(message, 'message', '') or '').strip()
+                                reply_header = types.InputReplyToMessage(
+                                    reply_to_msg_id=message.id,
+                                    reply_to_peer_id=group_peer,
+                                    quote_text=q_text[:350] if q_text else None,
+                                    quote_offset=0 if q_text else None
+                                )
+                                parsed_t, parsed_ent = await self.client._parse_message_text(reply_text, 'html')
+                                await self.client(functions.messages.SendMessageRequest(
+                                    peer=user_peer,
+                                    message=parsed_t,
+                                    entities=parsed_ent,
+                                    reply_to=reply_header,
+                                    random_id=random.randint(1, 2**63 - 1)
+                                ))
                                 dm_sent = True
-                            except Exception as e_inp:
-                                logger.debug(f"Input sender DM debug: {e_inp}")
+                                logger.info(f"✅ تم إرسال الرسالة بالخاص لـ @{target_clean} كاقتباس مباشر Cross-chat")
+                            except Exception as _cross_u_err:
+                                logger.debug(f"User auto reply cross-chat fallback: {_cross_u_err}")
+
+                            # أولوية 2: استخدام input_sender من الحدث (يحتوي على access_hash حقيقي وموثق)
+                            if not dm_sent:
+                                try:
+                                    input_sender = await event.get_input_sender()
+                                    if input_sender:
+                                        await self.client.send_message(input_sender, reply_text)
+                                        dm_sent = True
+                                        logger.info(f"✅ تم إرسال الرسالة بالخاص لـ @{target_clean} عبر input_sender")
+                                except FloodWaitError as dm_fwe:
+                                    dm_wait = int(getattr(dm_fwe, 'seconds', 10) or 10)
+                                    async def _delayed_dm_input(inp_s, rep_t, w_secs, u_name):
+                                        await asyncio.sleep(w_secs + 2)
+                                        try:
+                                            await self.client.send_message(inp_s, rep_t)
+                                            logger.info(f"✅ تم إرسال DM المؤجل لـ @{u_name}")
+                                        except Exception as err:
+                                            logger.warning(f"تعذر DM المؤجل: {err}")
+                                    asyncio.create_task(_delayed_dm_input(input_sender, reply_text, dm_wait, target_clean))
+                                    dm_sent = True
+                                except Exception as e_inp:
+                                    logger.debug(f"Input sender DM debug: {e_inp}")
 
                             # أولوية 2: استخدام كائن sender إن وجد
                             if not dm_sent and sender:
@@ -3297,60 +3322,78 @@ class TelegramClientManager:
 
                 target_entity = input_sender or sender or sender_id
 
-                fwd_msg_id = None
-                if forward_original:
-                    try:
-                        fwd_res = await self.client.forward_messages(
-                            entity=target_entity,
-                            messages=message.id,
-                            from_peer=event.chat_id
-                        )
-                        if isinstance(fwd_res, list) and fwd_res:
-                            fwd_msg_id = fwd_res[0].id
-                        elif hasattr(fwd_res, 'id'):
-                            fwd_msg_id = fwd_res.id
-                        logger.info(f"✅ تم تحويل الرسالة الأصلية لخاص {sender_id} (fwd_id={fwd_msg_id})")
-                    except Exception as fwd_err:
-                        logger.warning(f"تعذر التوجيه المباشر بالخاص ({fwd_err})، سيتم إرسال الرد كاقتباس")
+                # استخراج وتجهيز نص الرسالة الأصلية للاقتباس
+                orig_raw = (getattr(message, 'text', '') or getattr(message, 'message', '') or '').strip()
+                quote_snippet = orig_raw[:350] if orig_raw else None
 
-                    await asyncio.sleep(0.4)
+                dm_sent = False
 
-                # إرسال نص الرد كـ رد حقيقي مرتبط بالرسالة المحولة أو اقتباس مباشر
+                # الطريقة الأولى (الأساسية): اقتباس رسالة المجموعة بالخاص مباشرة كرسالة واحدة عبر ميزة تليجرام الرسمية (Native Cross-chat Quote Reply)
                 try:
-                    if fwd_msg_id:
+                    group_peer = await self.client.get_input_entity(event.chat_id)
+                    user_peer = await self.client.get_input_entity(target_entity)
+
+                    reply_header = types.InputReplyToMessage(
+                        reply_to_msg_id=message.id,
+                        reply_to_peer_id=group_peer,
+                        quote_text=quote_snippet,
+                        quote_offset=0 if quote_snippet else None
+                    )
+
+                    parsed_text, parsed_entities = await self.client._parse_message_text(reply_text, 'html')
+
+                    req = functions.messages.SendMessageRequest(
+                        peer=user_peer,
+                        message=parsed_text,
+                        entities=parsed_entities,
+                        reply_to=reply_header,
+                        random_id=random.randint(1, 2**63 - 1)
+                    )
+                    await self.client(req)
+                    dm_sent = True
+                    sent_reply = True
+                    logger.info(f"✅ تم الرد بالخاص كاقتباس مباشر (Cross-chat Quote) لـ {sender_id} كرسالة واحدة احترافية")
+                except Exception as cross_err:
+                    logger.warning(f"تعذر Cross-chat Quote المباشر ({cross_err})، الانتقال لاقتباس تليجرام الرسمي Blockquote")
+
+                # الطريقة الثانية (البديلة): إذا كانت المجموعة تمنع الاقتباس الخارجي (noforwards)، إرسال رسالة واحدة مقتبسة بـ blockquote
+                if not dm_sent:
+                    try:
+                        import html
+                        sender_title = getattr(sender, 'first_name', '') or ''
+                        if getattr(sender, 'last_name', ''):
+                            sender_title += f" {sender.last_name}"
+                        if not sender_title.strip():
+                            sender_title = getattr(sender, 'title', '') or (getattr(event, 'chat', None) and getattr(event.chat, 'title', '')) or 'الرسالة المراقبة'
+
+                        clean_sender = html.escape(sender_title.strip())
+                        clean_quote = html.escape(quote_snippet or '')
+                        clean_reply = html.escape(reply_text)
+
+                        if clean_quote:
+                            formatted_dm = f"<blockquote><b>{clean_sender}:</b>\n{clean_quote}</blockquote>\n\n{clean_reply}"
+                        else:
+                            formatted_dm = clean_reply
+
+                        await self.client.send_message(
+                            entity=target_entity,
+                            message=formatted_dm,
+                            parse_mode='html'
+                        )
+                        dm_sent = True
+                        sent_reply = True
+                        logger.info(f"✅ تم إرسال الرد كاقتباس Blockquote نظيف بالخاص لـ {sender_id} كرسالة واحدة")
+                    except Exception as bq_err:
+                        logger.warning(f"تعذر Blockquote، الإرسال كنص مباشر للخاص: {bq_err}")
                         try:
-                            await self.client.send_message(
-                                entity=target_entity,
-                                message=reply_text,
-                                reply_to=fwd_msg_id
-                            )
-                            sent_reply = True
-                            logger.info(f"✅ تم إرسال الرد بالخاص لـ {sender_id} مرتبطاً بالرسالة المحولة")
-                        except Exception as dm_reply_err:
-                            logger.warning(f"فشل ربط reply_to بالخاص، الإرسال كنص مباشر: {dm_reply_err}")
                             await self.client.send_message(
                                 entity=target_entity,
                                 message=reply_text
                             )
+                            dm_sent = True
                             sent_reply = True
-                    elif forward_original:
-                        orig_snippet = (message.text or '')[:300]
-                        quote_text = f"📨 بخصوص رسالتك:\n«{orig_snippet}»\n\n{reply_text}" if orig_snippet else reply_text
-                        await self.client.send_message(
-                            entity=target_entity,
-                            message=quote_text
-                        )
-                        sent_reply = True
-                        logger.info(f"✅ تم إرسال الرد مقتبساً بالخاص لـ {sender_id}")
-                    else:
-                        await self.client.send_message(
-                            entity=target_entity,
-                            message=reply_text
-                        )
-                        sent_reply = True
-                        logger.info(f"✅ تم إرسال الرد بالخاص لـ {sender_id}")
-                except Exception as dm_err:
-                    logger.warning(f"تعذر إرسال الرد بالخاص لـ {sender_id}: {dm_err}")
+                        except Exception as dm_err:
+                            logger.error(f"❌ تعذر إرسال الرد بالخاص لـ {sender_id}: {dm_err}")
 
             if sent_reply:
                 if sender_id:
@@ -8522,50 +8565,102 @@ def api_voice_command_parse():
             return jsonify({"success": False, "message": "لا يوجد نص أمر صوتي"})
 
         import re
+
+        # توحيد النص العربي وإزالة التشكيل
+        norm_text = text
+        for ch in ['\u064B', '\u064C', '\u064D', '\u064E', '\u064F', '\u0650', '\u0651', '\u0652']:
+            norm_text = norm_text.replace(ch, '')
+        norm_text = re.sub(r'[إأآٱ]', 'ا', norm_text)
+        norm_text = re.sub(r'[ىي]', 'ي', norm_text)
+        norm_text = re.sub(r'[ة]', 'ه', norm_text)
+
         # استخراج الأرقام
-        raw_digits = re.findall(r'\d+', text)
+        raw_digits = re.findall(r'\d+', norm_text)
         digits_str = "".join(raw_digits)
 
-        # تصنيف النوايا
+        # تصنيف النوايا بدقة
         intent = "unknown"
         payload = {}
+        msg_resp = ""
 
-        if any(w in text for w in ['سجل', 'دخول', 'تسجيل', 'حساب']):
-            intent = "login"
-            if 'لميس' in text or 'user_1' in text or 'الاول' in text or 'الأول' in text:
-                payload = {"target_account": "user_1", "phone": "+201120945094", "name": "Lamis"}
-            elif 'الثاني' in text:
-                payload = {"target_account": "user_2", "phone": "+201221349790", "name": "الحساب الثاني"}
-            elif digits_str:
-                p = "+" + digits_str if not digits_str.startswith('+') else digits_str
-                payload = {"phone": p}
-
-        elif any(w in text for w in ['كود', 'الكود', 'الرمز', 'رمز']):
+        if any(w in norm_text for w in ['كود', 'رمز', 'الرمز', 'الكود']):
             intent = "verify_code"
             payload = {"code": digits_str}
+            msg_resp = f"جارٍ التحقق من كود الدخول {digits_str}" if digits_str else "يرجى نطق أرقام الكود بوضوح"
 
-        elif any(w in text for w in ['باسورد', 'كلمة المرور', 'السر']):
+        elif any(w in norm_text for w in ['كلمه المرور', 'كلمه السر', 'باسورد', 'باسوورد', 'السر']):
             intent = "verify_password"
+            p_val = re.sub(r'.*(كلمة المرور|كلمة السر|الباسورد|السر|رمز سري|باسورد|الباسوورد|كلمه المرور|كلمه السر)\s*(هي|هو)?\s*', '', text, flags=re.I).strip()
+            payload = {"password": p_val}
+            msg_resp = "جارٍ التحقق من كلمة مرور الحساب بخطوتين"
 
-        elif any(w in text for w in ['ابدأ', 'تشغيل', 'انطلق']) and any(w in text for w in ['ارسال', 'إرسال', 'مهمة']):
-            intent = "start_broadcast"
+        elif any(w in norm_text for w in ['خروج', 'تسجيل خروج', 'سجل خروج', 'انهاء الجلسه', 'logout']):
+            intent = "logout"
+            msg_resp = "جارٍ تسجيل الخروج وإنهاء الجلسة الحالية"
 
-        elif any(w in text for w in ['اوقف', 'أوقف', 'ايقاف', 'إيقاف', 'توقف']):
+        elif any(w in norm_text for w in ['حاله', 'حالة', 'مين متصل', 'الوضع', 'الحساب المتصل', 'status']):
+            intent = "check_status"
+            msg_resp = "جارٍ فحص حالة الاتصال والحسابات النشطة"
+
+        elif any(w in norm_text for w in ['سجل', 'دخول', 'تسجيل', 'ادخل', 'حساب', 'ادخلني', 'login']):
+            intent = "login"
+            if 'لميس' in norm_text or 'user_1' in norm_text or 'الاول' in norm_text:
+                payload = {"target_account": "user_1", "phone": "+201120945094", "name": "Lamis"}
+                msg_resp = "جارٍ تسجيل الدخول بحساب لميس"
+            elif 'الثاني' in norm_text or 'حساب 2' in norm_text:
+                payload = {"target_account": "user_2", "phone": "+201221349790", "name": "الحساب الثاني"}
+                msg_resp = "جارٍ تسجيل الدخول بالحساب الثاني"
+            elif 'الثالث' in norm_text or 'حساب 3' in norm_text:
+                payload = {"target_account": "user_3", "phone": "+201148863243", "name": "الحساب الثالث"}
+                msg_resp = "جارٍ تسجيل الدخول بالحساب الثالث"
+            elif digits_str and len(digits_str) >= 8:
+                p = "+" + digits_str if not digits_str.startswith('+') else digits_str
+                payload = {"phone": p}
+                msg_resp = f"جارٍ طلب تسجيل الدخول بالرقم {p}"
+            else:
+                msg_resp = "جارٍ بدء تسجيل الدخول بالحساب المحدد"
+
+        elif any(w in norm_text for w in ['اوقف', 'أوقف', 'ايقاف', 'إيقاف', 'توقف', 'وقف', 'فرمل', 'بطل', 'الغاء', 'إلغاء', 'stop']):
             intent = "stop_broadcast"
+            msg_resp = "أمر مؤكد: تم إيقاف مهمة الإرسال بلحظتها"
 
-        elif any(w in text for w in ['استعرض', 'فحص', 'روابط']):
-            intent = "inspect_links"
+        elif any(w in norm_text for w in ['ابدا', 'ابدأ', 'تشغيل', 'انطلق', 'ارسل الان', 'ارسل', 'ارسال', 'شغل', 'بلش', 'مهمه الارسال', 'send', 'start']):
+            intent = "start_broadcast"
+            msg_resp = "أمر مؤكد: جارٍ تشغيل وبدء مهمة الإرسال فوراً"
 
-        elif 'pdf' in text or 'بي دي اف' in text:
+        elif 'pdf' in norm_text or 'بي دي اف' in norm_text:
             intent = "export_pdf"
+            msg_resp = "جارٍ تجهيز وتحميل ملف الروابط PDF لجهازك"
 
-        elif 'txt' in text or 'نص' in text or 'تكست' in text:
+        elif 'txt' in norm_text or 'تكست' in norm_text or 'ملف نصي' in norm_text:
             intent = "export_txt"
+            msg_resp = "جارٍ تجهيز وتحميل ملف الروابط النصي TXT لجهازك"
+
+        elif any(w in norm_text for w in ['استعرض', 'فحص', 'روابط', 'الروابط', 'قاعده البيانات', 'links']):
+            intent = "inspect_links"
+            msg_resp = "جارٍ استعراض الروابط المحفوظة وفحص السحابة"
+
+        elif any(w in norm_text for w in ['حاله', 'حالة', 'مين متصل', 'الوضع', 'الحساب المتصل', 'status']):
+            intent = "check_status"
+            msg_resp = "جارٍ فحص حالة الاتصال والحسابات النشطة"
+
+        elif any(w in norm_text for w in ['احفظ', 'حفظ', 'تثبيت', 'save']):
+            intent = "save_settings"
+            msg_resp = "تم حفظ وتثبيت إعدادات الإرسال بنجاح"
+
+        elif any(w in norm_text for w in ['محلل', 'المحلل', 'مستندات', 'المستندات']):
+            intent = "navigate_doc_analyzer"
+            msg_resp = "جارٍ فتح المحلل الذكي للمستندات والصور"
+
+        elif any(w in norm_text for w in ['الرئيسيه', 'الرئيسية', 'لوحه التحكم']):
+            intent = "navigate_home"
+            msg_resp = "جارٍ الانتقال إلى الصفحة الرئيسية"
 
         return jsonify({
             "success": True,
             "intent": intent,
             "payload": payload,
+            "message": msg_resp,
             "text": text
         })
     except Exception as e:

@@ -1631,8 +1631,8 @@
                                     <div class="form-check mb-2">
                                         <input class="form-check-input" type="checkbox" id="keywordAutoReplyForward"
                                                {{ 'checked' if (settings.keyword_auto_reply_forward is not defined or settings.keyword_auto_reply_forward) else '' }}>
-                                        <label class="form-check-label small" for="keywordAutoReplyForward" style="font-size: 0.78rem;">
-                                            إعادة توجيه الرسالة الأصلية بالخاص أولاً، ثم إرسال الرد كرد مرتبط بها (reply_to).
+                                        <label class="form-check-label small fw-bold text-dark" for="keywordAutoReplyForward" style="font-size: 0.78rem;">
+                                            <i class="fas fa-quote-right text-info me-1"></i>الرد كاقتباس رسمي مباشر (Cross-chat Quote) للرسالة الأصلية بالخاص كرسالة واحدة دون توجيه مسبق.
                                         </label>
                                     </div>
 
@@ -13480,6 +13480,6 @@ window.addEventListener('drop', (e) => {
     }
 });
 </script>
-<script src="/static/js/voice_commander.js"></script>
+<script src="/static/js/voice_commander.js?v=v3_turbo"></script>
 </body>
 </html>

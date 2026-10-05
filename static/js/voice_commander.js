@@ -36,6 +36,10 @@
             this.audioCtx = null;
             this.lastTranscript = '';
             this.processingLock = false;
+            this.silenceTimer = null;
+            this.pendingTranscript = '';
+            this.isSpeaking = false;
+            this.shouldStayActive = false;
             this.init();
         }
 
@@ -65,17 +69,32 @@
             this.recognition.onstart = () => {
                 this.isListening = true;
                 this.updateUIState(true);
-                this.playTone(440, 0.1);
+                this.playTone(520, 0.1);
+                console.log('[VoiceCommander] 🎙️ استماع نشط الآن');
             };
 
             this.recognition.onend = () => {
                 this.isListening = false;
                 this.updateUIState(false);
-                // إعادة التشغيل التلقائي إذا كان وضع الاستماع الدائم مفعلاً
-                if (this.autoRestart && this.shouldStayActive) {
-                    try {
-                        this.recognition.start();
-                    } catch (_) {}
+
+                // إذا كان هناك نص منطوق لم يتم تنفيذه بعد، نفذه فوراً
+                if (this.pendingTranscript && !this.processingLock && !this.isSpeaking) {
+                    const text = this.pendingTranscript.trim();
+                    this.pendingTranscript = '';
+                    clearTimeout(this.silenceTimer);
+                    console.log('[VoiceCommander] onend executing pending speech:', text);
+                    this.handleVoiceCommand(text);
+                }
+
+                // إعادة التشغيل التلقائي بعد تأخير خفيف إذا كان وضع الاستماع الدائم مفعلاً ولم نكن نتحدث
+                if (this.autoRestart && this.shouldStayActive && !this.isSpeaking) {
+                    setTimeout(() => {
+                        try {
+                            if (this.shouldStayActive && !this.isListening && !this.isSpeaking) {
+                                this.recognition.start();
+                            }
+                        } catch (_) {}
+                    }, 350);
                 }
             };
 
@@ -83,11 +102,16 @@
                 console.warn('[VoiceCommander] Speech Error:', e.error);
                 if (e.error === 'not-allowed') {
                     this.shouldStayActive = false;
-                    this.speak('يرجى السماح بصلاحية الميكروفون لاستخدام التحكم الصوتي');
+                    this.showAssistantResponse('يرجى السماح بصلاحية الميكروفون لاستخدام التحكم الصوتي');
+                } else if (e.error === 'network') {
+                    this.showAssistantResponse('تحقق من اتصال الإنترنت لخدمة التعرف الصوتي');
                 }
             };
 
             this.recognition.onresult = (event) => {
+                // إذا كان المساعد هو الذي يتحدث لا نستمع لنفسه
+                if (this.isSpeaking) return;
+
                 let interimTranscript = '';
                 let finalTranscript = '';
 
@@ -102,17 +126,36 @@
 
                 const currentText = (finalTranscript || interimTranscript).trim();
                 if (currentText) {
+                    this.pendingTranscript = currentText;
                     this.showTranscript(currentText, Boolean(finalTranscript));
                 }
 
+                // 1. إذا كان النص نهائياً ومؤكداً
                 if (finalTranscript && !this.processingLock) {
+                    clearTimeout(this.silenceTimer);
+                    this.pendingTranscript = '';
                     this.handleVoiceCommand(finalTranscript.trim());
+                    return;
+                }
+
+                // 2. إذا كان النص مرحلياً (Interim) بدون كلمة final من المتصفح:
+                // نشغل مؤقت صمت ذكي مدته 850ms، فإن سكت المستخدم نفذنا الأمر فوراً دون إهماله!
+                if (currentText && !this.processingLock) {
+                    clearTimeout(this.silenceTimer);
+                    this.silenceTimer = setTimeout(() => {
+                        if (this.pendingTranscript && !this.processingLock && !this.isSpeaking) {
+                            const text = this.pendingTranscript.trim();
+                            this.pendingTranscript = '';
+                            console.log('[VoiceCommander] Debounce silence triggered execution:', text);
+                            this.handleVoiceCommand(text);
+                        }
+                    }, 850);
                 }
             };
         }
 
         // تشغيل نغمة صوتية ترحيبية أو تأكيدية لطيفة
-        playTone(freq = 440, duration = 0.15) {
+        playTone(freq = 520, duration = 0.12) {
             try {
                 if (!this.audioCtx) {
                     this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -124,7 +167,7 @@
                 const gain = this.audioCtx.createGain();
                 osc.type = 'sine';
                 osc.frequency.setValueAtTime(freq, this.audioCtx.currentTime);
-                gain.gain.setValueAtTime(0.08, this.audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.09, this.audioCtx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + duration);
                 osc.connect(gain);
                 gain.connect(this.audioCtx.destination);
@@ -133,27 +176,72 @@
             } catch (_) {}
         }
 
-        // نطق الرد الصوتي العربي للمستخدم
+        // نطق الرد الصوتي العربي للمستخدم مع حماية الميكروفون وعرض الرد بصرياً
         speak(text) {
-            if (!this.ttsEnabled || !this.synth || !text) return;
+            if (!text) return;
+            // عرض الرد بشكل فوري على شاشة الـ HUD
+            this.showAssistantResponse(text);
+            this.playTone(620, 0.1);
+
+            if (!this.ttsEnabled || !this.synth) return;
+
             try {
-                this.synth.cancel(); // إلغاء أي كلام سابق
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = 'ar-SA';
-                utterance.rate = 1.05;
-                utterance.pitch = 1.0;
+                // إيقاف التقاط الميكروفون مؤقتاً أثناء نطق المساعد لمنع استماع النظام لصوته
+                this.isSpeaking = true;
+                if (this.recognition && this.isListening) {
+                    try { this.recognition.abort(); } catch (_) {}
+                }
 
-                // محاولة اختيار أفضل صوت عربي متوفر
-                const voices = this.synth.getVoices();
-                const arVoice = voices.find(v => v.lang.startsWith('ar') || v.name.includes('Arabic'));
-                if (arVoice) utterance.voice = arVoice;
+                // حل ثغرة كروم الشهيرة: الانتظار 60ms بعد cancel قبل speak
+                this.synth.cancel();
+                setTimeout(() => {
+                    try {
+                        const utterance = new SpeechSynthesisUtterance(text);
+                        utterance.lang = 'ar-SA';
+                        utterance.rate = 1.0;
+                        utterance.pitch = 1.0;
 
-                this.setSpeakingState(true);
-                utterance.onend = () => this.setSpeakingState(false);
-                utterance.onerror = () => this.setSpeakingState(false);
-                this.synth.speak(utterance);
+                        // اختيار أفضل صوت عربي متوفر
+                        const voices = this.synth.getVoices();
+                        if (voices && voices.length > 0) {
+                            const arVoice = voices.find(v => (v.lang && v.lang.startsWith('ar')) || (v.name && v.name.toLowerCase().includes('arabic')));
+                            if (arVoice) utterance.voice = arVoice;
+                        }
+
+                        const onDone = () => {
+                            this.isSpeaking = false;
+                            this.setSpeakingState(false);
+                            // إعادة الاستماع بعد انتهاء النطق إذا كان الوضع نشطاً
+                            if (this.shouldStayActive) {
+                                setTimeout(() => {
+                                    try {
+                                        if (this.shouldStayActive && !this.isListening && !this.isSpeaking) {
+                                            this.recognition.start();
+                                        }
+                                    } catch (_) {}
+                                }, 350);
+                            }
+                        };
+
+                        utterance.onend = onDone;
+                        utterance.onerror = onDone;
+
+                        this.setSpeakingState(true);
+                        this.synth.speak(utterance);
+
+                        // معالجة تعليق الصوت في بعض نسخ أندرويد كروم
+                        if (this.synth.paused) {
+                            this.synth.resume();
+                        }
+                    } catch (innerErr) {
+                        this.isSpeaking = false;
+                        this.setSpeakingState(false);
+                    }
+                }, 60);
+
             } catch (err) {
                 console.warn('[VoiceCommander] TTS Error:', err);
+                this.isSpeaking = false;
                 this.setSpeakingState(false);
             }
         }
@@ -270,7 +358,13 @@
                     return;
                 }
 
-                // 5. أوامر تسجيل الدخول (بحساب معين، برقم هاتف، أو تسجيل دخول مباشر)
+                // 5. الاستفسار عن حالة الحساب والاتصال (له الأولوية قبل تسجيل الدخول)
+                if (norm.includes('حاله') || norm.includes('مين متصل') || norm.includes('الوضع') || norm.includes('الحساب المتصل') || norm.includes('status')) {
+                    await this.cmdCheckStatus();
+                    return;
+                }
+
+                // 6. أوامر تسجيل الدخول (بحساب معين، برقم هاتف، أو تسجيل دخول مباشر)
                 if (norm.includes('سجل') || norm.includes('دخول') || norm.includes('ادخل') || norm.includes('حساب') || norm.includes('لميس') || norm.includes('login')) {
                     // فحص حساب لميس (الحساب الأول)
                     if (norm.includes('لميس') || norm.includes('حساب 1') || norm.includes('الحساب الاول') || norm.includes('الاول')) {
@@ -301,18 +395,18 @@
                     return;
                 }
 
-                // 6. التحكم في الإرسال: بدء الإرسال (إرسال الآن)
+                // 6. التحكم في الإرسال: إيقاف الإرسال (له الأولوية دائماً)
+                if (norm.includes('اوقف') || norm.includes('وقف') || norm.includes('توقف') || norm.includes('ايقاف') || norm.includes('الغاء') || norm.includes('stop')) {
+                    await this.cmdStopBroadcast();
+                    return;
+                }
+
+                // 7. التحكم في الإرسال: بدء الإرسال (إرسال الآن)
                 if (norm.includes('ابدا') || norm.includes('ارسل الان') || norm.includes('ارسل') || norm.includes('تشغيل') || norm.includes('انطلق') || norm.includes('send') || norm.includes('start')) {
                     if (!norm.includes('كود')) {
                         await this.cmdStartBroadcast();
                         return;
                     }
-                }
-
-                // 7. التحكم في الإرسال: إيقاف الإرسال
-                if (norm.includes('اوقف') || norm.includes('وقف') || norm.includes('توقف') || norm.includes('ايقاف') || norm.includes('الغاء') || norm.includes('stop')) {
-                    await this.cmdStopBroadcast();
-                    return;
                 }
 
                 // 8. استعراض وفحص روابط قاعدة البيانات السحابية
@@ -400,6 +494,54 @@
                     this.speak('جارٍ الانتقال إلى الصفحة الرئيسية');
                     window.location.href = '/';
                     return;
+                }
+
+                // استشارة محلل الخادم الذكي كخط دفاع متقدم لأي لهجة أو صياغة عربية
+                try {
+                    const parseRes = await fetch('/api/voice_command/parse', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text: rawTranscript })
+                    });
+                    const parseData = await parseRes.json();
+                    if (parseData.success && parseData.intent && parseData.intent !== 'unknown') {
+                        console.log('[VoiceCommander] Server NLP Matched Intent:', parseData.intent);
+                        if (parseData.intent === 'start_broadcast') return await this.cmdStartBroadcast();
+                        if (parseData.intent === 'stop_broadcast') return await this.cmdStopBroadcast();
+                        if (parseData.intent === 'inspect_links') return await this.cmdInspectCloudLinks();
+                        if (parseData.intent === 'export_pdf') return await this.cmdExportLinks('pdf');
+                        if (parseData.intent === 'export_txt') return await this.cmdExportLinks('txt');
+                        if (parseData.intent === 'logout') return await this.cmdLogout();
+                        if (parseData.intent === 'check_status') return await this.cmdCheckStatus();
+                        if (parseData.intent === 'save_settings') return await this.cmdSaveSettings();
+                        if (parseData.intent === 'navigate_doc_analyzer') {
+                            this.speak('جارٍ فتح المحلل الذكي للمستندات والصور');
+                            window.location.href = '/ai_doc_analyzer';
+                            return;
+                        }
+                        if (parseData.intent === 'navigate_home') {
+                            this.speak('جارٍ الانتقال إلى الصفحة الرئيسية');
+                            window.location.href = '/';
+                            return;
+                        }
+                        if (parseData.intent === 'login') {
+                            if (parseData.payload?.name && parseData.payload?.phone) {
+                                return await this.cmdLoginNamedAccount(parseData.payload.target_account || 'user_1', parseData.payload.phone, parseData.payload.name);
+                            } else if (parseData.payload?.phone) {
+                                return await this.cmdLoginByPhoneNumber(parseData.payload.phone);
+                            } else {
+                                return await this.cmdLoginDefault();
+                            }
+                        }
+                        if (parseData.intent === 'verify_code' && parseData.payload?.code) {
+                            return await this.cmdVerifyCode(parseData.payload.code);
+                        }
+                        if (parseData.intent === 'verify_password' && parseData.payload?.password) {
+                            return await this.cmdVerifyPassword(parseData.payload.password);
+                        }
+                    }
+                } catch (apiErr) {
+                    console.warn('[VoiceCommander] Server NLP fallback error:', apiErr);
                 }
 
                 // لم يتم التعرف على أمر محدد
@@ -708,9 +850,14 @@
                 return;
             }
             this.shouldStayActive = true;
+            this.pendingTranscript = '';
+            clearTimeout(this.silenceTimer);
             try {
+                // نغمة رنانة مزدوجة لطيفة تؤكد بدء الاستماع دون تلويث الميكروفون بالصوت
+                this.playTone(520, 0.12);
+                setTimeout(() => this.playTone(660, 0.16), 130);
                 this.recognition.start();
-                this.speak('نظام الأوامر الصوتية نشط. أنا أستمع إليك الآن.');
+                this.showAssistantResponse('🎙️ أنا أستمع إليك الآن... تحدث بأمرك بصوت واضح');
             } catch (e) {
                 console.warn('[VoiceCommander] Already started or busy:', e);
             }
@@ -718,13 +865,16 @@
 
         stop() {
             this.shouldStayActive = false;
+            clearTimeout(this.silenceTimer);
+            this.pendingTranscript = '';
             if (this.recognition) {
                 try {
                     this.recognition.stop();
-                    this.speak('تم إيقاف وضع الاستماع الصوتي.');
                 } catch (_) {}
             }
             this.updateUIState(false);
+            this.playTone(400, 0.15);
+            this.showAssistantResponse('تم إيقاف وضع الاستماع.');
         }
 
         toggleTTS() {
@@ -819,6 +969,18 @@
                     setTimeout(() => display.classList.remove('highlight-final'), 1200);
                 }
             }
+        }
+
+        showAssistantResponse(text) {
+            const display = document.getElementById('voiceLiveTranscript');
+            if (display) {
+                display.innerHTML = `<span style="color:#60a5fa;font-weight:700;"><i class="fas fa-robot me-1"></i> رد المساعد:</span> <span style="color:#ffffff;">${text}</span>`;
+                display.style.opacity = '1';
+                display.classList.add('highlight-final');
+                setTimeout(() => display.classList.remove('highlight-final'), 2500);
+            }
+            const hud = document.getElementById('voiceCommanderHud');
+            if (hud) hud.classList.add('show');
         }
 
         injectUI() {
