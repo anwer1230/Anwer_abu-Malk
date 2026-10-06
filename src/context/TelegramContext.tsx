@@ -21,6 +21,7 @@ import {
   ProfileUserInfo,
   ViewerMediaItem,
   TypingUser,
+  KeywordAlertItem,
 } from '../types';
 import {
   CURRENT_USER,
@@ -263,9 +264,47 @@ interface TelegramContextType {
   loadMoreChatMessages: (chatId: string) => Promise<{ loadedCount: number; hasMore: boolean }>;
   isChatLoadingOlder: Record<string, boolean>;
   chatHasMoreOlder: Record<string, boolean>;
+
+  // Background Watch Words & Messages Monitor Service
+  watchWords: string[];
+  updateWatchWords: (words: string[]) => void;
+  monitoredChatIds: string[];
+  setMonitoredChatIds: (chatIds: string[]) => void;
+  isWatchWordsMonitorActive: boolean;
+  toggleWatchWordsMonitor: (forceState?: boolean) => void;
+  keywordAlertsHistory: KeywordAlertItem[];
+  clearKeywordAlertsHistory: () => void;
+  checkWatchWordsInChats: () => void;
 }
 
 const TelegramContext = createContext<TelegramContextType | undefined>(undefined);
+
+export const DEFAULT_WATCH_WORDS: string[] = [
+  'انجاز',
+  'إنجاز',
+  'واجب',
+  'مشروع',
+  'بحث',
+  'اختبار',
+  'كويز',
+  'تكليف',
+  'تقرير',
+  'بوربوينت',
+  'عرض',
+  'تلخيص',
+];
+
+export const normalizeTextForMatching = (text: string): string => {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, '') // remove Arabic diacritics / tashkeel
+    .replace(/[إأآا]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[\s\-_]+/g, ' ')
+    .trim();
+};
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   theme: 'dark',
@@ -276,6 +315,10 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   soundEffects: true,
   autoDownloadMedia: true,
   chatWallpaper: 'default',
+  watch_words: DEFAULT_WATCH_WORDS,
+  watchWords: DEFAULT_WATCH_WORDS,
+  monitoringEnabled: true,
+  monitoringIntervalSeconds: 6,
 };
 
 export const sanitizeChat = (c: Chat): Chat => {
@@ -2756,6 +2799,260 @@ export const TelegramProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
   };
 
+  // ═════════════════════════════════════════════════════════════
+  // 🔍 Background Watch Words & Messages Monitor Service
+  // Periodically checks monitored chats for new messages matching watch_words
+  // ═════════════════════════════════════════════════════════════
+  const [monitoredChatIds, setMonitoredChatIds] = useState<string[]>(
+    () => settings.monitoredChatIds || []
+  );
+  const [isWatchWordsMonitorActive, setIsWatchWordsMonitorActive] = useState<boolean>(
+    () => settings.monitoringEnabled !== false
+  );
+  const [keywordAlertsHistory, setKeywordAlertsHistory] = useState<KeywordAlertItem[]>(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        const saved = localStorage.getItem('tg_keyword_alerts_history');
+        if (saved) return JSON.parse(saved);
+      }
+    } catch {}
+    return [];
+  });
+
+  const checkedMessageIdsRef = useRef<Set<string>>(new Set());
+  const initialHistoryPopulatedRef = useRef<boolean>(false);
+
+  // Extract current watch words from settings (supporting watch_words or watchWords)
+  const currentWatchWords = useMemo<string[]>(() => {
+    const raw = settings.watch_words || settings.watchWords;
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.map((w) => String(w).trim()).filter(Boolean);
+    }
+    if (typeof raw === 'string' && (raw as string).trim().length > 0) {
+      return (raw as string)
+        .split(/[\n,]+/)
+        .map((w) => w.trim())
+        .filter(Boolean);
+    }
+    return DEFAULT_WATCH_WORDS;
+  }, [settings.watch_words, settings.watchWords]);
+
+  const updateWatchWords = useCallback((words: string[]) => {
+    const cleaned = Array.from(new Set(words.map((w) => w.trim()).filter(Boolean)));
+    updateSettings({
+      watch_words: cleaned,
+      watchWords: cleaned,
+    });
+    showToast(
+      settings.language === 'ar'
+        ? `✅ تم تحديث كلمات المراقبة (${cleaned.length} كلمة)`
+        : `Watch words updated (${cleaned.length} words)`,
+      '🎯'
+    );
+  }, [updateSettings, settings.language]);
+
+  const toggleWatchWordsMonitor = useCallback((forceState?: boolean) => {
+    setIsWatchWordsMonitorActive((prev) => {
+      const next = typeof forceState === 'boolean' ? forceState : !prev;
+      updateSettings({ monitoringEnabled: next });
+      showToast(
+        next
+          ? (settings.language === 'ar' ? '🚀 تم تفعيل خدمة مراقبة الكلمات المستمرة' : 'Watch words monitor enabled')
+          : (settings.language === 'ar' ? '⏹ تم إيقاف خدمة مراقبة الكلمات' : 'Watch words monitor paused'),
+        next ? '🔔' : '⏸️'
+      );
+      return next;
+    });
+  }, [updateSettings, settings.language]);
+
+  const clearKeywordAlertsHistory = useCallback(() => {
+    setKeywordAlertsHistory([]);
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('tg_keyword_alerts_history');
+      }
+    } catch {}
+    showToast(
+      settings.language === 'ar' ? 'تم مسح سجل تنبيهات الكلمات' : 'Keyword alerts history cleared',
+      '🗑️'
+    );
+  }, [settings.language]);
+
+  // Core scan routine: inspects monitored chats for new messages containing watch_words
+  const checkWatchWordsInChats = useCallback(() => {
+    if (!isWatchWordsMonitorActive || currentWatchWords.length === 0) return;
+
+    const normalizedKeywords = currentWatchWords
+      .map((kw) => ({
+        raw: kw,
+        normalized: normalizeTextForMatching(kw),
+      }))
+      .filter((kw) => kw.normalized.length > 0);
+
+    if (normalizedKeywords.length === 0) return;
+
+    // Filter which chats to inspect: explicit monitoredChatIds if set, otherwise all non-archived chats
+    const targetChats = chats.filter((c) => {
+      if (!c || c.isArchived) return false;
+      if (monitoredChatIds && monitoredChatIds.length > 0) {
+        return monitoredChatIds.includes(c.id);
+      }
+      return true;
+    });
+
+    const newMatches: KeywordAlertItem[] = [];
+
+    // On the initial run, record existing historical messages to avoid alerting old messages
+    if (!initialHistoryPopulatedRef.current) {
+      for (const chat of chats) {
+        const chatMsgs = messages[chat.id] || [];
+        for (const msg of chatMsgs) {
+          if (msg && msg.id) {
+            checkedMessageIdsRef.current.add(msg.id);
+          }
+        }
+      }
+      initialHistoryPopulatedRef.current = true;
+      return;
+    }
+
+    for (const chat of targetChats) {
+      const chatMsgs = messages[chat.id] || [];
+      if (!chatMsgs || chatMsgs.length === 0) continue;
+
+      // Check recent messages in stream
+      const recentMsgs = chatMsgs.slice(-15);
+
+      for (const msg of recentMsgs) {
+        if (!msg || !msg.id || checkedMessageIdsRef.current.has(msg.id)) {
+          continue;
+        }
+
+        checkedMessageIdsRef.current.add(msg.id);
+
+        const msgText = msg.text || '';
+        if (!msgText.trim()) continue;
+
+        const normalizedMsg = normalizeTextForMatching(msgText);
+
+        for (const kw of normalizedKeywords) {
+          if (normalizedMsg.includes(kw.normalized)) {
+            const sender = msg.senderName || chat.title || 'مستخدم';
+            const alertItem: KeywordAlertItem = {
+              id: `kw_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              keyword: kw.raw,
+              chatId: chat.id,
+              chatTitle: chat.title || 'محادثة',
+              messageId: msg.id,
+              messageText: msgText,
+              senderName: sender,
+              timestamp: Date.now(),
+            };
+
+            newMatches.push(alertItem);
+
+            // Trigger In-App Notification banner
+            triggerNotification({
+              category: 'message',
+              title: `🎯 تنبيه كلمة مراقبة: "${kw.raw}"`,
+              body: `${chat.title}: ${msgText.slice(0, 100)}`,
+              chatId: chat.id,
+              senderName: sender,
+              avatar: chat.avatar,
+            });
+
+            // Show Toast Alert
+            showToast(
+              settings.language === 'ar'
+                ? `🔔 رصد كلمة "${kw.raw}" في ${chat.title}`
+                : `Matched "${kw.raw}" in ${chat.title}`,
+              '🎯'
+            );
+
+            // Audio Alert
+            if (settings.soundEffects !== false) {
+              try {
+                telegramAudio.playMessageReceived();
+              } catch {}
+            }
+
+            break;
+          }
+        }
+      }
+    }
+
+    if (newMatches.length > 0) {
+      setKeywordAlertsHistory((prev) => {
+        const combined = [...newMatches, ...prev].slice(0, 60);
+        try {
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('tg_keyword_alerts_history', JSON.stringify(combined));
+          }
+        } catch {}
+        return combined;
+      });
+    }
+  }, [
+    isWatchWordsMonitorActive,
+    currentWatchWords,
+    chats,
+    monitoredChatIds,
+    messages,
+    triggerNotification,
+    showToast,
+    settings.language,
+    settings.soundEffects,
+  ]);
+
+  // 🔄 Periodic Background Service for Watch Words & Monitored Chats
+  useEffect(() => {
+    if (!isWatchWordsMonitorActive) return;
+
+    checkWatchWordsInChats();
+
+    const intervalSec = Math.max(
+      3,
+      Number(settings.monitoringIntervalSeconds) || 6
+    );
+
+    const intervalTimer = window.setInterval(() => {
+      checkWatchWordsInChats();
+    }, intervalSec * 1000);
+
+    return () => {
+      window.clearInterval(intervalTimer);
+    };
+  }, [
+    isWatchWordsMonitorActive,
+    settings.monitoringIntervalSeconds,
+    checkWatchWordsInChats,
+  ]);
+
+  // Initial Sync from backend /api/my_alerts/settings to get persisted watch_words
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/my_alerts/settings')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!isMounted || !data) return;
+        const serverWords = data.settings?.watch_words;
+        if (Array.isArray(serverWords) && serverWords.length > 0) {
+          setSettings((prev) => {
+            if (!prev.watch_words || prev.watch_words.length === 0) {
+              return { ...prev, watch_words: serverWords, watchWords: serverWords };
+            }
+            return prev;
+          });
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const editMessageText = (messageId: string, newText: string) => {
     if (!activeChatId || !newText.trim()) return;
     setMessages((prev) => {
@@ -3672,6 +3969,16 @@ export const TelegramProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         blockUser,
         unblockUser,
         isUserBlocked,
+        // Background Watch Words & Messages Monitor Service
+        watchWords: currentWatchWords,
+        updateWatchWords,
+        monitoredChatIds,
+        setMonitoredChatIds,
+        isWatchWordsMonitorActive,
+        toggleWatchWordsMonitor,
+        keywordAlertsHistory,
+        clearKeywordAlertsHistory,
+        checkWatchWordsInChats,
       }}
     >
       {children}

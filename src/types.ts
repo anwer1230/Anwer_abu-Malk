@@ -454,6 +454,22 @@ export interface AppSettings {
   plusThemeEnabled?: boolean;
   useSQLiteMMAP?: boolean;
   biometricLock?: boolean;
+  watch_words?: string[];
+  watchWords?: string[];
+  monitoredChatIds?: string[];
+  monitoringIntervalSeconds?: number;
+  monitoringEnabled?: boolean;
+}
+
+export interface KeywordAlertItem {
+  id: string;
+  keyword: string;
+  chatId: string;
+  chatTitle: string;
+  messageId: string;
+  messageText: string;
+  senderName: string;
+  timestamp: number;
 }
 
 export interface ActiveCall {
