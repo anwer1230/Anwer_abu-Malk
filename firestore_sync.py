@@ -19,6 +19,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+try:
+    from ai_engine.telegram_bridge import generate_reply
+except Exception:
+    generate_reply = None
+
 logger = logging.getLogger('firestore_sync')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

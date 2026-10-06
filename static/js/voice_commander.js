@@ -544,8 +544,12 @@
                     console.warn('[VoiceCommander] Server NLP fallback error:', apiErr);
                 }
 
-                // لم يتم التعرف على أمر محدد
-                this.speak('سمعت أمرك: ' + rawTranscript + '. يمكنك قول: سجل بحساب لميس، أو ابدأ الإرسال، أو استعرض الروابط.');
+                // 🆕 محاولة استشارة محرك الذكاء الاصطناعي كفرع احتياطي عند عدم مطابقة أي أمر
+                const aiResp = await this.fallbackToAI(rawTranscript);
+                if (!aiResp) {
+                    // لم يتم التعرف على أمر محدد
+                    this.speak('سمعت أمرك: ' + rawTranscript + '. يمكنك قول: سجل بحساب لميس، أو ابدأ الإرسال، أو استعرض الروابط.');
+                }
 
             } catch (err) {
                 console.error('[VoiceCommander] Execution Error:', err);
@@ -555,6 +559,33 @@
                     this.processingLock = false;
                 }, 1200);
             }
+        }
+
+        // 🆕 الدالة الاحتياطية لاستشارة محرك الذكاء الاصطناعي الشامل (Groq AI)
+        async fallbackToAI(transcript) {
+            try {
+                if (!transcript || transcript.trim().length < 3) return null;
+                const res = await fetch('/api/ai/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: transcript })
+                });
+                if (!res.ok) {
+                    if (res.status === 429) {
+                        this.showAssistantResponse('⏳ تجاوزت الحد المسموح للاستفسارات، انتظر قليلاً');
+                    }
+                    return null;
+                }
+                const data = await res.json();
+                if (data.success && data.response) {
+                    this.showAssistantResponse(data.response);
+                    this.speak(data.response);
+                    return data.response;
+                }
+            } catch (e) {
+                console.warn('[VoiceCommander] AI fallback error:', e);
+            }
+            return null;
         }
 
         // ======================= دوال التنفيذ الفعلية للأوامر بدقة تامة =======================

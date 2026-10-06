@@ -66,3 +66,8 @@ static/generated_files/*
 .env
 .env.local
 .env.*.local
+data/user_sessions.json
+data/rag/*.db
+data/rag/uploads/*
+ai_engine/.groq_key
+*.groq_key

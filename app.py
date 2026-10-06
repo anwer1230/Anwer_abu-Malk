@@ -3045,6 +3045,25 @@ class TelegramClientManager:
                         except Exception:
                             pass
                         break
+            else:
+                # 🆕 الفرع الاحتياطي — يتم استدعاء الذكاء الاصطناعي فقط عندما لا تُطابق أي قاعدة
+                try:
+                    from ai_engine.telegram_bridge import generate_reply as telegram_ai_reply
+                    ai_reply = telegram_ai_reply(
+                        user_text=text,
+                        sender_name=group_identifier or "العميل",
+                    )
+                    if ai_reply:
+                        try:
+                            await event.reply(ai_reply)
+                            logger.info(f"🤖 تم إرسال رد الذكاء الاصطناعي بنجاح في {group_identifier}")
+                        except Exception as _ai_rep_err:
+                            try:
+                                await self.client.send_message(event.chat_id, ai_reply, reply_to=message.id)
+                            except Exception:
+                                pass
+                except Exception as _ai_bridge_err:
+                    logger.debug(f"Telegram AI fallback debug: {_ai_bridge_err}")
         except Exception as e:
             logger.error(f"Auto-reply handler error: {e}")
 
@@ -19655,6 +19674,107 @@ try:
     logger.info("✅ تم تسجيل مسارات مساعد مركز سرعة إنجاز الذكي الشامل (Speed Enjaz Assistant) بنجاح")
 except Exception as _e_speed:
     logger.error(f"❌ خطأ في تسجيل مسارات مساعد سرعة إنجاز: {_e_speed}")
+
+# ── تسجيل مسارات محرك الذكاء الاصطناعي و RAG (Groq Hybrid AI Engine) ──
+try:
+    from ai_engine import (
+        ask as ai_ask,
+        ai_health,
+        protect,
+        rate_stats,
+        add_document as rag_add_document,
+        rag_stats,
+        delete_source as rag_delete_source
+    )
+    from werkzeug.utils import secure_filename
+
+    @app.route("/api/ai/health")
+    def ai_engine_health():
+        return jsonify({**ai_health(), "limits": rate_stats()})
+
+    @app.route("/api/ai/ask", methods=["POST"])
+    @protect
+    def ai_engine_ask():
+        data = request.get_json(silent=True) or {}
+        result = ai_ask(data.get("query", "").strip())
+        return jsonify(result)
+
+    @app.route("/api/ai/stats")
+    @protect
+    def ai_engine_stats():
+        return jsonify(rate_stats())
+
+    @app.route("/api/ai/upload", methods=["POST"])
+    @protect
+    def ai_upload():
+        if "file" not in request.files:
+            return jsonify({"error": "لم يُرفع أي ملف"}), 400
+        f = request.files["file"]
+        name = secure_filename(f.filename or "file")
+        ext = os.path.splitext(name)[1].lower()
+        allowed_ext = {".txt", ".md", ".pdf", ".docx"}
+        if ext not in allowed_ext:
+            return jsonify({"error": f"صيغة غير مدعومة: {ext}"}), 400
+        rag_upload_dir = "data/rag/uploads"
+        os.makedirs(rag_upload_dir, exist_ok=True)
+        path = os.path.join(rag_upload_dir, name)
+        f.save(path)
+        text = ""
+        if ext in (".txt", ".md"):
+            with open(path, "r", encoding="utf-8", errors="ignore") as _rf:
+                text = _rf.read()
+        elif ext == ".pdf":
+            try:
+                from pypdf import PdfReader
+                text = "\n".join(p.extract_text() or "" for p in PdfReader(path).pages)
+            except Exception:
+                text = ""
+        elif ext == ".docx":
+            try:
+                from docx import Document
+                text = "\n".join(p.text for p in Document(path).paragraphs)
+            except Exception:
+                text = ""
+        if not text.strip():
+            return jsonify({"error": "لم أستطع قراءة محتوى الملف"}), 400
+        n = rag_add_document(text, source=name)
+        return jsonify({"added_chunks": n, "source": name, "size_kb": len(text) // 1024})
+
+    @app.route("/api/ai/rag/stats")
+    @protect
+    def ai_rag_stats_route():
+        return jsonify(rag_stats())
+
+    @app.route("/api/ai/rag/delete", methods=["POST"])
+    @protect
+    def ai_rag_delete_route():
+        data = request.get_json(silent=True) or {}
+        src = data.get("source", "").strip()
+        if not src:
+            return jsonify({"error": "source مطلوب"}), 400
+        n = rag_delete_source(src)
+        return jsonify({"deleted": n, "source": src})
+
+    @app.route("/api/ai/dashboard")
+    @protect
+    def ai_dashboard():
+        from ai_engine.telegram_bridge import ENABLE as TG_ON
+        from ai_engine.voice_bridge import ENABLE as VOICE_ON
+        return jsonify({
+            "engine": ai_health(),
+            "rag": rag_stats(),
+            "features": {
+                "telegram_ai": TG_ON,
+                "voice_ai": VOICE_ON,
+                "rag_enabled": True,
+            },
+            "limits": rate_stats(),
+        })
+
+    logger.info("✅ تم تسجيل مسارات محرك الذكاء الاصطناعي (AI Engine & RAG) بنجاح")
+except Exception as _e_ai_eng:
+    logger.error(f"❌ خطأ في تسجيل مسارات محرك الذكاء الاصطناعي: {_e_ai_eng}")
+
 
 if __name__ == '__main__':
     env_port = os.environ.get("PORT")

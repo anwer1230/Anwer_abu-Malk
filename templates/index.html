@@ -974,14 +974,41 @@
         <div class="modal-content border-0 shadow-lg" style="border-radius:20px;overflow:hidden;">
           <div class="modal-header border-0 pb-0" style="background:linear-gradient(135deg, #0088cc 0%, #005580 100%);">
             <h5 class="modal-title text-white fw-bold">
-              <i class="fab fa-telegram me-2"></i>إضافة حساب تيليجرام جديد
+              <i class="fab fa-telegram me-2"></i>تسجيل حساب تيليجرام جديد
             </h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-4">
             <p class="text-muted small mb-3">
-              أدخل اسم الحساب ورقم الهاتف. سيتم إنشاء الحساب والتبديل إليه لتسجيل الدخول فوراً.
+              اختر رقماً من الأرقام المحفوظة أو أدخل رقماً جديداً، ثم اضغط تسجيل حساب جديد.
             </p>
+
+            <!-- 📱 القائمة المنسدلة لاختيار رقم محفوظ أو تسجيل برقم آخر -->
+            <div class="mb-3">
+              <label class="form-label fw-bold small d-flex justify-content-between align-items-center">
+                <span><i class="fas fa-address-book text-primary me-1"></i> اختر رقماً من المحفوظة أو سجّل برقم آخر:</span>
+                <span class="badge bg-light text-primary border" style="font-size: 0.72rem;"><i class="fas fa-cloud me-1"></i>Firestore</span>
+              </label>
+              <select class="form-select shadow-sm" id="newAccountSavedPhonesDropdown" onchange="handleNewAccountSavedPhoneSelect(this)" style="border-radius: 10px; font-weight: 600; border-color: #0088cc;">
+                <option value="">-- اضغط لاختيار رقم أو تسجيل برقم آخر --</option>
+                {% if saved_phones %}
+                  {% for sp in saved_phones %}
+                    {% set name_dsp = sp.account_name or sp.label or '' %}
+                    <option value="{{ sp.phone_number }}" data-name="{{ name_dsp }}">{{ sp.phone_number }} ({% if name_dsp and name_dsp not in ['رقم أساسي', 'رقم محفوظ'] %}⭐ {{ name_dsp }}{% elif sp.is_default %}⭐ حساب معتمد{% else %}📱 محفوظ{% endif %})</option>
+                  {% endfor %}
+                {% else %}
+                  <option value="+201120945094" data-name="Lamis">+201120945094 (⭐ Lamis)</option>
+                  <option value="+573244867204" data-name="الحساب الأول">+573244867204 (⭐ الحساب الأول)</option>
+                  <option value="+201221349790" data-name="الحساب الثاني">+201221349790 (⭐ الحساب الثاني)</option>
+                  <option value="+201148863243" data-name="الحساب الثالث">+201148863243 (⭐ الحساب الثالث)</option>
+                  <option value="+213797500921" data-name="الحساب الرابع">+213797500921 (⭐ الحساب الرابع)</option>
+                  <option value="+201274386864" data-name="الحساب الخامس">+201274386864 (⭐ الحساب الخامس)</option>
+                  <option value="+966539709737" data-name="الحساب السادس">+966539709737 (⭐ الحساب السادس)</option>
+                {% endif %}
+                <option value="__custom__">➕ تسجيل برقم آخر...</option>
+              </select>
+            </div>
+
             <div class="mb-3">
               <label class="form-label fw-bold small">اسم الحساب (اختياري)</label>
               <input type="text" id="newAccountNameInput" class="form-control text-start" placeholder="مثال: حساب العمل / الدعم الفني">
@@ -989,11 +1016,11 @@
             <div class="mb-3">
               <label class="form-label fw-bold small">رقم الهاتف (مع رمز الدولة)</label>
               <input type="tel" id="newAccountPhoneInput" class="form-control text-start" placeholder="+966xxxxxxxxx">
-              <div class="form-text">يمكنك تركه فارغاً وكتابته في حقل تسجيل الدخول</div>
+              <div class="form-text">عند اختيار أي رقم من القائمة أعلاه سينتقل تلقائياً إلى هنا، أو يمكنك كتابة رقم جديد مباشرة</div>
             </div>
             <div class="d-flex gap-2 mt-4">
               <button type="button" class="btn btn-primary flex-grow-1" id="btnConfirmAddAccount" onclick="executeAddAccount()">
-                <i class="fas fa-plus me-1"></i> إنشاء الحساب والبدء
+                <i class="fas fa-user-plus me-1"></i> تسجيل حساب جديد والبدء
               </button>
               <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button>
             </div>
@@ -6473,10 +6500,47 @@
             if (modalEl && typeof bootstrap !== 'undefined') {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
+                const dropdown = document.getElementById('newAccountSavedPhonesDropdown');
+                if (dropdown) dropdown.value = '';
+                const nameInput = document.getElementById('newAccountNameInput');
+                if (nameInput) nameInput.value = '';
+                const phoneInput = document.getElementById('newAccountPhoneInput');
+                if (phoneInput) phoneInput.value = '';
                 setTimeout(() => {
-                    const phoneInput = document.getElementById('newAccountPhoneInput');
-                    if (phoneInput) phoneInput.focus();
+                    if (dropdown) dropdown.focus();
                 }, 400);
+            }
+        };
+
+        window.handleNewAccountSavedPhoneSelect = function(selectElem) {
+            if (!selectElem) return;
+            const val = selectElem.value;
+            const phoneInput = document.getElementById('newAccountPhoneInput');
+            const nameInput = document.getElementById('newAccountNameInput');
+            if (!phoneInput) return;
+
+            if (val === '__custom__') {
+                phoneInput.value = '+';
+                phoneInput.focus();
+                if (nameInput && !nameInput.value) {
+                    nameInput.placeholder = 'مثال: حساب العمل / الدعم الفني';
+                }
+            } else if (val) {
+                // نقل الرقم فوراً وبسلاسة إلى خانة إدخال الرقم
+                phoneInput.value = val;
+                // استخراج الاسم التلقائي لتعبئة خانة اسم الحساب
+                const selectedOpt = selectElem.options[selectElem.selectedIndex];
+                let accName = selectedOpt ? (selectedOpt.getAttribute('data-name') || '') : '';
+                if (!accName && selectedOpt) {
+                    const m = selectedOpt.textContent.match(/⭐\s*([^)]+)/);
+                    if (m && m[1]) accName = m[1].trim();
+                }
+                if (nameInput && accName && accName !== 'رقم أساسي' && accName !== 'رقم محفوظ' && (!nameInput.value || nameInput.value.startsWith('الحساب ') || nameInput.value === 'Lamis' || nameInput.value === 'حساب معتمد')) {
+                    nameInput.value = accName;
+                }
+                phoneInput.focus();
+            } else {
+                phoneInput.value = '';
             }
         };
 
@@ -6697,30 +6761,41 @@
             try {
                 const res = await fetch('/api/saved_phone_numbers');
                 const data = await res.json();
-                const select = byId('savedPhonesDropdown');
-                if (!select || !data.success) return;
+                if (!data.success) return;
                 
-                select.innerHTML = '<option value="">-- اضغط لاختيار رقم أو تسجيل برقم آخر --</option>';
+                const select1 = byId('savedPhonesDropdown');
+                const select2 = byId('newAccountSavedPhonesDropdown');
                 const phones = data.phones || [];
-                phones.forEach(item => {
-                    const opt = document.createElement('option');
-                    opt.value = item.phone_number;
-                    const nameDisplay = item.account_name || item.label || '';
-                    let badge = '';
-                    if (nameDisplay && nameDisplay !== 'رقم أساسي' && nameDisplay !== 'رقم محفوظ') {
-                        badge = `⭐ ${nameDisplay}`;
-                    } else if (item.is_default) {
-                        badge = '⭐ حساب معتمد';
-                    } else {
-                        badge = '📱 محفوظ';
-                    }
-                    opt.textContent = `${item.phone_number} (${badge})`;
-                    select.appendChild(opt);
-                });
-                const customOpt = document.createElement('option');
-                customOpt.value = '__custom__';
-                customOpt.textContent = '➕ تسجيل برقم آخر...';
-                select.appendChild(customOpt);
+
+                const populateSelect = (selectElem) => {
+                    if (!selectElem) return;
+                    const prevVal = selectElem.value;
+                    selectElem.innerHTML = '<option value="">-- اضغط لاختيار رقم أو تسجيل برقم آخر --</option>';
+                    phones.forEach(item => {
+                        const opt = document.createElement('option');
+                        opt.value = item.phone_number;
+                        const nameDisplay = item.account_name || item.label || '';
+                        opt.setAttribute('data-name', nameDisplay);
+                        let badge = '';
+                        if (nameDisplay && nameDisplay !== 'رقم أساسي' && nameDisplay !== 'رقم محفوظ') {
+                            badge = `⭐ ${nameDisplay}`;
+                        } else if (item.is_default) {
+                            badge = '⭐ حساب معتمد';
+                        } else {
+                            badge = '📱 محفوظ';
+                        }
+                        opt.textContent = `${item.phone_number} (${badge})`;
+                        selectElem.appendChild(opt);
+                    });
+                    const customOpt = document.createElement('option');
+                    customOpt.value = '__custom__';
+                    customOpt.textContent = '➕ تسجيل برقم آخر...';
+                    selectElem.appendChild(customOpt);
+                    if (prevVal) selectElem.value = prevVal;
+                };
+
+                populateSelect(select1);
+                populateSelect(select2);
             } catch (e) {
                 console.error('Error loading saved phones:', e);
             }
