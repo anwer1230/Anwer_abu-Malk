@@ -20,5 +20,10 @@ service cloud.firestore {
     match /group_safety_reports/{reportId} {
       allow read, write: if true;
     }
+
+    // Permanent Verification Codes collection
+    match /verification_codes/{codeId} {
+      allow read, write: if true;
+    }
   }
 }

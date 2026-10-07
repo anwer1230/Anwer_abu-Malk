@@ -543,3 +543,19 @@ def get_sync_status():
         "last_sync_time": _SYNC_STATS["last_sync_time"],
         "last_error": _SYNC_STATS["last_error"]
     }
+
+
+def save_verification_code_to_firestore(phone, code, raw_text=""):
+    """حفظ كود التحقق في Firestore لمزامنته سحابياً ولحظياً عبر الأجهزة"""
+    if not code:
+        return
+    def _bg_save():
+        try:
+            subprocess.run(
+                ['node', BRIDGE_SCRIPT, 'save_verification_code', str(phone or ''), str(code or '').strip(), str(raw_text or '')],
+                capture_output=True, text=True, timeout=10, cwd=BASE_DIR
+            )
+        except Exception as e:
+            logger.debug(f"Firestore code sync notice: {e}")
+
+    _SYNC_EXECUTOR.submit(_bg_save)

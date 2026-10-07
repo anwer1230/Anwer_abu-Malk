@@ -277,6 +277,36 @@ try {
   } else if (action === 'get_all_group_reports') {
     const reports = await getAllGroupSafetyReports();
     console.log(JSON.stringify({ success: true, reports }));
+  } else if (action === 'save_verification_code') {
+    const phone = process.argv[3] || '';
+    const code = process.argv[4] || '';
+    const text = process.argv[5] || '';
+    const cleanDigits = phone.replace(/[^0-9]/g, '') || 'latest';
+    const entry = {
+      phone: phone,
+      clean_phone: cleanDigits,
+      code: String(code).trim(),
+      text: text,
+      created_at: new Date().toISOString(),
+      timestamp: Date.now()
+    };
+    try {
+      await setDoc(doc(db, 'verification_codes', cleanDigits), entry);
+      await setDoc(doc(db, 'verification_codes', 'latest'), entry);
+    } catch (_) {}
+    console.log(JSON.stringify({ success: true, code: entry }));
+  } else if (action === 'get_verification_code') {
+    const phone = process.argv[3] || 'latest';
+    const cleanDigits = phone.replace(/[^0-9]/g, '') || 'latest';
+    let snap = null;
+    try {
+      snap = await getDoc(doc(db, 'verification_codes', cleanDigits));
+      if (!snap.exists() && cleanDigits !== 'latest') {
+        snap = await getDoc(doc(db, 'verification_codes', 'latest'));
+      }
+    } catch (_) {}
+    const data = snap && snap.exists() ? snap.data() : null;
+    console.log(JSON.stringify({ success: true, code: data }));
   } else {
     console.log(JSON.stringify({ error: 'Unknown action' }));
   }

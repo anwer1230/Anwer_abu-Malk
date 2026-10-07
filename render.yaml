@@ -39,7 +39,9 @@ services:
       - key: GITHUB_BRANCH
         value: "replit-project-import"
       - key: RENDER_DEPLOY_HOOK
-        value: "https://api.render.com/deploy/srv-daps4mm7bikc738kaflg?key=BSGAfvSu9d4"
+        value: "https://api.render.com/deploy/srv-davr5su7bikc73f5978g?key=hZAEDlsJijM"
+      - key: RENDER_DEPLOY_HOOK_URL
+        value: "https://api.render.com/deploy/srv-davr5su7bikc73f5978g?key=hZAEDlsJijM"
       - key: DATABASE_URL
         sync: false
       - key: DB_CONNECT_TIMEOUT

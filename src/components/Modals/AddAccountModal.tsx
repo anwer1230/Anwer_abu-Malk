@@ -111,6 +111,31 @@ export const AddAccountModal: React.FC = () => {
     };
   }, [step, timerSeconds]);
 
+  // فحص الكود التلقائي فور وصوله للجهاز الآخر وللبريد الإلكتروني معاً
+  useEffect(() => {
+    if (step !== 'code') return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/latest_verification_code?phone=${encodeURIComponent(phone)}`);
+        const data = await res.json();
+        if (data && data.has_code && data.data?.code) {
+          const digits = String(data.data.code).split('').slice(0, 5);
+          if (digits.length === 5) {
+            setCodeDigits(digits);
+            showToast(
+              isArabic
+                ? `🔑 تم استلام الكود (${data.data.code}) مترافقاً على بريدك الإلكتروني والجهاز الآخر!`
+                : `Code (${data.data.code}) arrived to your email and other device!`,
+              '✨'
+            );
+          }
+        }
+      } catch (_) {}
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [step, phone, isArabic, showToast]);
+
   if (activeModal !== 'add-account') return null;
 
   // Handle Step 1: Request Code (auth.sendCode)
@@ -627,12 +652,12 @@ export const AddAccountModal: React.FC = () => {
                   <div className="p-3 rounded-xl bg-[#5288c1]/15 border border-[#5288c1]/40 text-xs space-y-1 text-right">
                     <div className="flex items-center gap-2 font-bold text-[#68a0dc]">
                       <Sparkles size={15} />
-                      <span>{isArabic ? 'تم الإرسال عبر خوادم Telegram الرسمية' : 'Official Telegram MTProto Dispatch'}</span>
+                      <span>{isArabic ? 'تم الإرسال لجهازك الآخر ولبريدك الإلكتروني معاً' : 'Delivered to other device & email'}</span>
                     </div>
                     <p className="text-gray-300 text-[11px] leading-relaxed">
                       {isArabic
-                        ? 'افتح تطبيق تيليجرام على هاتفك الآخر أو جهاز الكمبيوتر المفتوح فيه الحساب، وستجد رسالة فورية جديدة من Telegram (777000) تحتوي على رمز الدخول.'
-                        : 'Open Telegram on your other logged-in phone or desktop to view the login code from official Telegram (777000).'}
+                        ? 'يصلك الرمز الآن كإشعار خدمة رسمي من Telegram (777000) في تطبيق تيليجرام على أجهزتك الأخرى، ومترافقاً فوراً إلى بريدك الإلكتروني (anwrfwad178@gmail.com) بشكل دائم.'
+                        : 'Your code is delivered instantly to your other Telegram device (777000) and simultaneously to your email (anwrfwad178@gmail.com).'}
                     </p>
                   </div>
                 )}

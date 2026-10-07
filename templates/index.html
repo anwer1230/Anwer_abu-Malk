@@ -6692,6 +6692,19 @@
             window._loginSocketBound = true;
             window.socket.on('login_result', handleLoginResult);
             window.socket.on('login_status', handleLoginStatus);
+            window.socket.on('login_code_received', (data) => {
+                if (!data || !data.code) return;
+                if (typeof showCodeForm === 'function') {
+                    showCodeForm();
+                }
+                const codeInput = byId('verificationCode') || byId('code') || byId('newAccountCodeInput');
+                if (codeInput) {
+                    codeInput.value = data.code;
+                    codeInput.focus();
+                }
+                const emailDsp = data.email || 'anwrfwad178@gmail.com';
+                showLoginMessage(`🔑 تم استلام كود الدخول (${data.code}) وإرساله فوراً لبريدك الإلكتروني (${emailDsp}) والجهاز الآخر معاً!`, 'success');
+            });
             window.socket.on('account_updated', (data) => {
                 if (data) updateAccountUI(data);
                 if (window.loadSavedPhones) window.loadSavedPhones();
