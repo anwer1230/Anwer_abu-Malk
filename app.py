@@ -2023,6 +2023,8 @@ class TelegramClientManager:
         self.my_username = None
         self.my_name = None
         self._my_alerts_processed = set()
+        self._my_sent_message_ids = set()
+        self._my_sent_msg_texts = {}
 
     async def _ensure_my_info(self):
         """التحقق وتخزين هوية الحساب المسجل لاستخدامه في فحص الردود والتنبيهات"""
@@ -2048,7 +2050,7 @@ class TelegramClientManager:
                 logger.debug(f"Failed to get_me for {self.user_id}: {e}")
         return self.my_id
 
-    async def send_to_saved_messages(self, text, parse_mode=None):
+    async def send_to_saved_messages(self, text, parse_mode='md'):
         """إرسال إشعار مباشرة إلى الرسائل المحفوظة (Saved Messages) مع حماية ضد أخطاء التنسيق"""
         try:
             if self.client and self.client.is_connected():
@@ -2068,6 +2070,82 @@ class TelegramClientManager:
         except Exception as e:
             logger.error(f"Failed to send to saved messages for {self.user_id}: {str(e)}")
             return False
+    async def trigger_action_alert(self, action_type, chat_title, details_text, direct_link=None, actor_name="المشرف"):
+        """
+        إرسال تنبيه فوري لحساب تيليجرام عند الحظر أو التقييد أو الطرد أو التحذير أو الكابتشا،
+        وتسجيله في السجل وإرساله فوراً إلى الرسائل المحفوظة.
+        """
+        try:
+            settings = load_settings(self.user_id)
+            if not settings.get('my_alerts_enabled', True):
+                return
+            if not settings.get('my_alerts_actions', True):
+                return
+
+            current_time = time.strftime('%Y-%m-%d %I:%M:%S %p')
+            icons = {
+                "ban": "🚨",
+                "mute": "🔇",
+                "kick": "🚪",
+                "warning": "⚠️",
+                "captcha": "🛡️",
+                "promotion": "👑"
+            }
+            titles = {
+                "ban": "تم حظرك من المجموعة!",
+                "mute": "تم تقييدك من الكتابة والإرسال!",
+                "kick": "تم طردك من المجموعة!",
+                "warning": "تنبيه مخالفة أو تحذير لحسابك!",
+                "captcha": "تنبيه تحقق وكابتشا عاجل!",
+                "promotion": "تمت ترقيتك إلى مشرف!"
+            }
+            icon = icons.get(action_type, "⚠️")
+            title = titles.get(action_type, "تنبيه موجه لحسابك")
+
+            lines = [
+                f"{icon} **تنبيهاتي | {title}**",
+                "━━━━━━━━━━━━━━━━━━",
+                f"📌 **المجموعة / المحادثة:** {chat_title}",
+                f"⏰ **الوقت:** {current_time}",
+                f"👤 **المسؤول / الفاعل:** {actor_name}",
+                f"💬 **التفاصيل:**\n> {details_text}"
+            ]
+            if direct_link and direct_link != '#':
+                lines.append(f"\n🔗 **رابط مباشر:**\n{direct_link}")
+
+            alert_text = "\n".join(lines)
+            await self.send_to_saved_messages(alert_text, parse_mode='md')
+
+            socketio.emit('log_update', {
+                "message": f"{icon} [تنبيهاتي] {title} في: {chat_title}"
+            }, to=self.user_id)
+
+            socketio.emit('my_alert_event', {
+                "type": action_type,
+                "group": chat_title,
+                "sender": actor_name,
+                "actor": actor_name,
+                "time": current_time,
+                "link": direct_link or "#",
+                "text": details_text,
+                "sound_enabled": bool(settings.get('my_alerts_reply_sound_enabled', True)),
+                "sound_tone": str(settings.get('my_alerts_reply_sound_tone', 'chime'))
+            }, to=self.user_id)
+
+            # تسجيل التنبيه في سجل المستخدم وقاعدة البيانات
+            alert_queue.add_alert(self.user_id, {
+                "keyword": f"تنبيهاتي: {title}",
+                "group": chat_title,
+                "sender": actor_name,
+                "message": details_text,
+                "full_message": details_text,
+                "timestamp": time.strftime('%H:%M:%S'),
+                "link": direct_link or "#",
+                "already_sent_tg": True
+            })
+        except Exception as e:
+            logger.error(f"Error in trigger_action_alert: {e}")
+
 
     async def get_group_protection_details(self, entity_obj):
         """
@@ -2332,6 +2410,23 @@ class TelegramClientManager:
 
             @self.client.on(events.NewMessage())
             async def new_message_handler(event):
+                # تسجيل الرسائل الصادرة الخاصة بالحساب في الذاكرة لرصد أي ردود عليها لاحقاً فورياً
+                if getattr(event.message, 'out', False):
+                    try:
+                        c_id = getattr(event, 'chat_id', 0)
+                        m_id = getattr(event.message, 'id', 0)
+                        if c_id and m_id:
+                            self._my_sent_message_ids.add((c_id, m_id))
+                            if len(self._my_sent_message_ids) > 10000:
+                                self._my_sent_message_ids = set(list(self._my_sent_message_ids)[-5000:])
+                            txt = event.message.text or ''
+                            if txt:
+                                self._my_sent_msg_texts[(c_id, m_id)] = txt[:120]
+                                if len(self._my_sent_msg_texts) > 5000:
+                                    for old_k in list(self._my_sent_msg_texts.keys())[:2000]:
+                                        self._my_sent_msg_texts.pop(old_k, None)
+                    except Exception:
+                        pass
                 await self._handle_new_message(event)
                 await self._handle_my_alerts(event)
                 await self._handle_link_radar(event)
@@ -2352,16 +2447,16 @@ class TelegramClientManager:
 
             self.event_handlers_registered = True
             logger.info(f"✅ Event handlers registered for user {self.user_id} (messages, alerts, actions, participant updates)")
-
         except Exception as e:
             logger.error(f"Failed to register event handlers: {str(e)}")
 
     async def _handle_my_alerts(self, event):
         """
         وظيفة «تنبيهاتي»:
-        - إشعار عند قيام أي شخص بالرد على أي رسالة من رسائلي في أي مجموعة.
-        - إشعار عند إعطاء تحذير أو مخالفة للحساب مع رابط مباشر لرسالة التحذير.
-        يرسل التنبيه فوراً إلى «الرسائل المحفوظة» (Saved Messages) برابط مباشر.
+        - مراقبة وحراسة شاملة للحساب في المجموعات والقنوات والمحادثات الخاصة.
+        - إشعار فوري عند قيام أي شخص بالرد على أي رسالة من رسائلي.
+        - إشعار فوري عند إعطاء تحذير أو كتم أو تقييد أو كابتشا أو تنبيه بعدم إرسال شيء معين.
+        يرسل التنبيه فوراً إلى «الرسائل المحفوظة» (Saved Messages) برابط مباشر مع التنبيه الصوتي والتوست.
         """
         try:
             settings = load_settings(self.user_id)
@@ -2372,12 +2467,8 @@ class TelegramClientManager:
             if not message:
                 return
 
-            # تجاهل الرسائل الصادرة من نفس الحساب
+            # تجاهل الرسائل الصادرة من نفس الحساب (لكي لا ينبه على نفسه)
             if getattr(message, 'out', False):
-                return
-
-            # التنبيهات مخصصة للمجموعات والقنوات التفاعلية
-            if not (event.is_group or event.is_channel):
                 return
 
             await self._ensure_my_info()
@@ -2387,16 +2478,26 @@ class TelegramClientManager:
             msg_uid = f"alert_{getattr(event, 'chat_id', 0)}_{message.id}"
             if msg_uid in self._my_alerts_processed:
                 return
-            if len(self._my_alerts_processed) > 1000:
+            if len(self._my_alerts_processed) > 2000:
                 self._my_alerts_processed.clear()
 
             chat = await event.get_chat()
-            chat_title = getattr(chat, 'title', None) or f"مجموعة #{getattr(event, 'chat_id', '')}"
-            chat_username = getattr(chat, 'username', None)
+            is_private = bool(event.is_private)
+            chat_title = getattr(chat, 'title', None)
+            if not chat_title:
+                if is_private:
+                    sf = getattr(chat, 'first_name', '') or ''
+                    sl = getattr(chat, 'last_name', '') or ''
+                    chat_title = f"{sf} {sl}".strip() or getattr(chat, 'username', None) or f"محادثة خاصة #{getattr(event, 'chat_id', '')}"
+                else:
+                    chat_title = f"مجموعة #{getattr(event, 'chat_id', '')}"
 
+            chat_username = getattr(chat, 'username', None)
             # تكوين الرابط المباشر للرسالة
             if chat_username:
                 direct_msg_link = f"https://t.me/{chat_username}/{message.id}"
+            elif is_private:
+                direct_msg_link = f"https://t.me/{getattr(chat, 'username', '')}" if getattr(chat, 'username', None) else "#"
             else:
                 raw_cid = str(getattr(chat, 'id', getattr(event, 'chat_id', 0))).replace("-100", "").replace("-", "")
                 direct_msg_link = f"https://t.me/c/{raw_cid}/{message.id}"
@@ -2414,52 +2515,138 @@ class TelegramClientManager:
             msg_text = message.text or ''
             msg_text_lower = msg_text.lower()
 
-            warning_keywords = [
-                'تحذير', 'انذار', 'إنذار', 'تم تحذيرك', 'تم إعطاؤك تحذير', 'اعطائك تحذير',
-                'تحذير رقم', 'warn', 'warning', 'مخالفة', 'مخالف للقوانين',
-                'تم تقييدك', 'تم كتمك', 'تم طردك', 'تم حظرك'
-            ]
-            has_warning_keyword = any(kw in msg_text_lower for kw in warning_keywords)
-
             # 1. هل الرسالة رد على إحدى رسائلي؟
             is_reply_to_me = False
             original_text = ""
-            if message.is_reply:
-                try:
-                    reply_msg = await message.get_reply_message()
-                    if reply_msg and reply_msg.sender_id == self.my_id:
-                        is_reply_to_me = True
-                        original_text = reply_msg.text or '[رسالة وسائط أو ملصق]'
-                        if len(original_text) > 80:
-                            original_text = original_text[:80] + '...'
-                except Exception as r_err:
-                    logger.debug(f"Failed to get reply message for alert: {r_err}")
+            reply_to = getattr(message, 'reply_to', None)
+            reply_to_msg_id = getattr(reply_to, 'reply_to_msg_id', None) if reply_to else None
+            chat_id = getattr(event, 'chat_id', 0)
 
-            # 2. هل الرسالة تذكر حسابي (منشن أو تاج)؟
+            if reply_to_msg_id:
+                # أ) التحقق فائق السرعة من الذاكرة المحلية (يعمل حتى لو حذف البوت رسالتك الأصلية فوراً)
+                if (chat_id, reply_to_msg_id) in self._my_sent_message_ids:
+                    is_reply_to_me = True
+                    original_text = self._my_sent_msg_texts.get((chat_id, reply_to_msg_id), '[رسالتك الأصلية]')
+                else:
+                    try:
+                        reply_msg = await message.get_reply_message()
+                        if reply_msg and reply_msg.sender_id == self.my_id:
+                            is_reply_to_me = True
+                            original_text = reply_msg.text or '[رسالة وسائط أو ملصق]'
+                            if len(original_text) > 80:
+                                original_text = original_text[:80] + '...'
+                            self._my_sent_message_ids.add((chat_id, reply_to_msg_id))
+                    except Exception as r_err:
+                        logger.debug(f"Failed to get reply message for alert: {r_err}")
+            elif is_private:
+                # في المحادثات الخاصة الفردية، أي رسالة واردة من الطرف الآخر تعتبر تواصلاً موجهاً لك
+                is_reply_to_me = True
+
+            # 2. هل الرسالة تذكر حسابي (منشن، تاج، أو بالاسم)؟
             is_mentioning_me = False
             if self.my_username and f"@{self.my_username.lower()}" in msg_text_lower:
                 is_mentioning_me = True
+            elif self.my_name and len(self.my_name.strip()) > 2 and self.my_name.lower() in msg_text_lower:
+                is_mentioning_me = True
             elif hasattr(message, 'entities') and message.entities:
                 for ent in message.entities:
-                    if getattr(ent, 'user_id', None) == self.my_id:
+                    ent_uid = getattr(ent, 'user_id', None)
+                    if ent_uid and ent_uid == self.my_id:
                         is_mentioning_me = True
                         break
 
-            # ── الحالة الأولى: تحذير موجه للحساب (عبر الرد أو المنشن) ──
-            if (is_reply_to_me or is_mentioning_me) and has_warning_keyword and settings.get('my_alerts_actions', True):
+            # 3. فحص تنبيهات التحقق والكابتشا (Captcha / Verification)
+            captcha_keywords = [
+                'تحقق', 'كابتشا', 'captcha', 'اثبت انك', 'اثبت أنك', 'إثبات أنك', 'أثبت أنك',
+                'لست روبوت', 'لست بوت', 'اضغط للتحقق', 'اضغط على الزر', 'اضغط هنا للتحقق',
+                'verify', 'verification', 'solve the captcha', 'human verification',
+                'أكمل التحقق', 'زر التحقق', 'تأكيد الحساب', 'تأكيد العضوية'
+            ]
+            is_captcha = any(kw in msg_text_lower for kw in captcha_keywords)
+
+            # فحص وجود أزرار كابتشا أو تحقق تفاعلية مضمنة في الرسالة
+            has_verification_button = False
+            if hasattr(message, 'buttons') and message.buttons:
+                for btn_row in message.buttons:
+                    for btn in (btn_row if isinstance(btn_row, list) else [btn_row]):
+                        btn_txt = getattr(btn, 'text', '').lower()
+                        if any(k in btn_txt for k in ['تحقق', 'verify', 'click', 'اضغط', 'حل', 'human', 'بوت']):
+                            has_verification_button = True
+                            break
+
+            # 4. فحص تنبيهات المنع وقوانين النشر في المجموعات
+            rule_warning_keywords = [
+                'ممنوع الروابط', 'يمنع نشر الروابط', 'ممنوع إرسال الروابط', 'قفل الروابط',
+                'ممنوع إرسال', 'يمنع إرسال', 'لا ترسل روابط', 'لا ترسل', 'يمنع التوجيه',
+                'ممنوع التوجيه', 'ممنوع الإعلانات', 'يمنع الإعلان', 'ممنوع النشر',
+                'قوانين المجموعة', 'مخالف للشروط', 'مخالف للقوانين', 'مخالفة', 'مخالفه'
+            ]
+            is_rule_warning = any(kw in msg_text_lower for kw in rule_warning_keywords)
+
+            # 5. فحص تنبيهات العقوبات (كتم، تقييد، تحذير، حظر)
+            penalty_keywords = [
+                'تحذير', 'انذار', 'إنذار', 'تم تحذيرك', 'تم إعطاؤك تحذير', 'اعطائك تحذير',
+                'تحذير رقم', 'warn', 'warning', 'تم تقييدك', 'تم كتمك', 'تم طردك', 'تم حظرك',
+                'تقييد العضو', 'كتم العضو', 'حظر العضو', 'طرد العضو', 'تم حظر المستخدم',
+                'تم كتم المستخدم', 'تم إسكاتك', 'تم اسكاتك', 'muted', 'restricted', 'banned', 'kicked',
+                'spam detected', 'antispam'
+            ]
+            is_penalty = any(kw in msg_text_lower for kw in penalty_keywords)
+
+            # ── الحالة أ: تنبيه كابتشا أو تحقق بشري عاجل ──
+            if (is_reply_to_me or is_mentioning_me) and (is_captcha or has_verification_button) and settings.get('my_alerts_actions', True):
                 self._my_alerts_processed.add(msg_uid)
-                alert_text = (
-                    "⚠️ **تنبيهاتي | تم إعطاؤك تحذيراً!**\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
-                    f"📌 **اسم المجموعة:** {chat_title}\n"
-                    f"👤 **المشرف / صاحب التحذير:** {sender_name}\n"
-                    f"⏰ **الوقت:** {current_time}\n"
-                    f"💬 **نص التحذير:**\n> {msg_text[:250]}\n\n"
-                    f"🔗 **رابط مباشر لرسالة التحذير:**\n{direct_msg_link}"
-                )
-                await self.send_to_saved_messages(alert_text)
+                lines = [
+                    "🛡️ **تنبيهاتي | تنبيه تحقق وكابتشا عاجل!**",
+                    "━━━━━━━━━━━━━━━━━━",
+                    f"📌 **المجموعة / المحادثة:** {chat_title}",
+                    f"👤 **بوت التحقق:** {sender_name}",
+                    f"⏰ **الوقت:** {current_time}",
+                    f"💬 **نص التحقق:**\n> {msg_text[:250] or '[تحقق تفاعلي عبر الأزرار]'}",
+                    f"\n🔗 **رابط مباشر لرسالة التحقق:**\n{direct_msg_link}"
+                ]
+                alert_text = "\n".join(lines)
+                await self.send_to_saved_messages(alert_text, parse_mode='md')
                 socketio.emit('log_update', {
-                    "message": f"⚠️ [تنبيهاتي] تم إعطاؤك تحذيراً في: {chat_title}"
+                    "message": f"🛡️ [تنبيهاتي] تنبيه تحقق وكابتشا مطلوب في: {chat_title}"
+                }, to=self.user_id)
+                socketio.emit('my_alert_event', {
+                    "type": "captcha",
+                    "group": chat_title,
+                    "sender": sender_name,
+                    "time": current_time,
+                    "link": direct_msg_link,
+                    "text": msg_text[:250] or 'مطلوب إكمال التحقق البشري لتجنب الحظر'
+                }, to=self.user_id)
+                alert_queue.add_alert(self.user_id, {
+                    "keyword": "تنبيهاتي: تحقق وكابتشا عاجل",
+                    "group": chat_title,
+                    "sender": sender_name,
+                    "message": msg_text[:250] or 'مطلوب إكمال التحقق البشري',
+                    "full_message": msg_text,
+                    "timestamp": time.strftime('%H:%M:%S'),
+                    "link": direct_msg_link,
+                    "already_sent_tg": True
+                })
+                return
+
+            # ── الحالة ب: تنبيه تحذير أو منع أو تقييد موجه للحساب ──
+            if (is_reply_to_me or is_mentioning_me) and (is_penalty or is_rule_warning) and settings.get('my_alerts_actions', True):
+                self._my_alerts_processed.add(msg_uid)
+                warn_type = "تحذير ومخالفة" if is_penalty else "تنبيه بقوانين المجموعة ومنع النشر"
+                lines = [
+                    f"⚠️ **تنبيهاتي | {warn_type}!**",
+                    "━━━━━━━━━━━━━━━━━━",
+                    f"📌 **اسم المجموعة:** {chat_title}",
+                    f"👤 **المشرف / صاحب التنبيه:** {sender_name}",
+                    f"⏰ **الوقت:** {current_time}",
+                    f"💬 **نص التنبيه:**\n> {msg_text[:250]}",
+                    f"\n🔗 **رابط مباشر لرسالة التنبيه:**\n{direct_msg_link}"
+                ]
+                alert_text = "\n".join(lines)
+                await self.send_to_saved_messages(alert_text, parse_mode='md')
+                socketio.emit('log_update', {
+                    "message": f"⚠️ [تنبيهاتي] {warn_type} في: {chat_title}"
                 }, to=self.user_id)
                 socketio.emit('my_alert_event', {
                     "type": "warning",
@@ -2469,26 +2656,38 @@ class TelegramClientManager:
                     "link": direct_msg_link,
                     "text": msg_text[:250]
                 }, to=self.user_id)
+                alert_queue.add_alert(self.user_id, {
+                    "keyword": f"تنبيهاتي: {warn_type}",
+                    "group": chat_title,
+                    "sender": sender_name,
+                    "message": msg_text[:250],
+                    "full_message": msg_text,
+                    "timestamp": time.strftime('%H:%M:%S'),
+                    "link": direct_msg_link,
+                    "already_sent_tg": True
+                })
                 return
 
-            # ── الحالة الثانية: أي شخص يرد على أي رسالة من رسائلي ──
+            # ── الحالة ج: أي شخص يرد على أي رسالة من رسائلي ──
             if is_reply_to_me and settings.get('my_alerts_replies', True):
                 self._my_alerts_processed.add(msg_uid)
                 reply_preview = msg_text or '[رسالة وسائط أو ملصق]'
                 if len(reply_preview) > 200:
                     reply_preview = reply_preview[:200] + '...'
-
-                alert_text = (
-                    "💬 **تنبيهاتي | رد جديد على رسالتك**\n"
-                    "━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 **قام بالرد:** {sender_name}\n"
-                    f"📌 **المجموعة:** {chat_title}\n"
-                    f"⏰ **الوقت:** {current_time}\n"
-                    f"✉️ **رسالتك الأصلية:**\n> {original_text}\n\n"
-                    f"💬 **نص الرد:**\n> {reply_preview}\n\n"
-                    f"🔗 **رابط مباشر لرسالة الرد:**\n{direct_msg_link}"
-                )
-                await self.send_to_saved_messages(alert_text)
+                orig_preview = original_text or '[رسالتك الأصلية]'
+                chat_context = "محادثة خاصة" if is_private else f"المجموعة: {chat_title}"
+                lines = [
+                    "💬 **تنبيهاتي | رد جديد على رسالتك**",
+                    "━━━━━━━━━━━━━━━━━━",
+                    f"👤 **قام بالرد:** {sender_name}",
+                    f"📌 **المكان:** {chat_context}",
+                    f"⏰ **الوقت:** {current_time}",
+                    f"✉️ **رسالتك الأصلية:**\n> {orig_preview}\n",
+                    f"💬 **نص الرد:**\n> {reply_preview}",
+                    f"\n🔗 **رابط مباشر لرسالة الرد:**\n{direct_msg_link}"
+                ]
+                alert_text = "\n".join(lines)
+                await self.send_to_saved_messages(alert_text, parse_mode='md')
                 socketio.emit('log_update', {
                     "message": f"💬 [تنبيهاتي] رد جديد من {sender_name} في {chat_title}"
                 }, to=self.user_id)
@@ -2502,8 +2701,17 @@ class TelegramClientManager:
                     "sound_enabled": bool(settings.get('my_alerts_reply_sound_enabled', True)),
                     "sound_tone": str(settings.get('my_alerts_reply_sound_tone', 'chime'))
                 }, to=self.user_id)
+                alert_queue.add_alert(self.user_id, {
+                    "keyword": "تنبيهاتي: رد جديد على رسالتك",
+                    "group": chat_title,
+                    "sender": sender_name,
+                    "message": reply_preview,
+                    "full_message": msg_text,
+                    "timestamp": time.strftime('%H:%M:%S'),
+                    "link": direct_msg_link,
+                    "already_sent_tg": True
+                })
                 return
-
         except Exception as e:
             logger.error(f"Error in _handle_my_alerts: {e}", exc_info=True)
 
@@ -2585,11 +2793,16 @@ class TelegramClientManager:
                     f"👤 **قام بالترقية:** {actor_name}\n"
                     f"🔗 **رابط المجموعة:**\n{chat_link}"
                 )
-                await self.send_to_saved_messages(alert_text)
+                await self.send_to_saved_messages(alert_text, parse_mode='md')
                 socketio.emit('log_update', {"message": f"👑 [تنبيهاتي] تمت ترقيتك لمشرف في: {chat_title}"}, to=self.user_id)
                 socketio.emit('my_alert_event', {
                     "type": "promotion", "group": chat_title, "actor": actor_name, "time": current_time, "link": chat_link
                 }, to=self.user_id)
+                alert_queue.add_alert(self.user_id, {
+                    "keyword": "تنبيهاتي: ترقية إلى مشرف", "group": chat_title, "sender": actor_name,
+                    "message": f"تمت ترقيتك إلى مشرف في {chat_title}", "timestamp": time.strftime('%H:%M:%S'),
+                    "link": chat_link, "already_sent_tg": True
+                })
 
             # 2. حظر أو تقييد
             elif isinstance(new_p, types.ChannelParticipantBanned):
@@ -2604,11 +2817,16 @@ class TelegramClientManager:
                         f"👤 **قام بالحظر:** {actor_name}\n"
                         f"🔗 **رابط المجموعة:**\n{chat_link}"
                     )
-                    await self.send_to_saved_messages(alert_text)
+                    await self.send_to_saved_messages(alert_text, parse_mode='md')
                     socketio.emit('log_update', {"message": f"🚨 [تنبيهاتي] تم حظرك من: {chat_title}"}, to=self.user_id)
                     socketio.emit('my_alert_event', {
                         "type": "ban", "group": chat_title, "actor": actor_name, "time": current_time, "link": chat_link
                     }, to=self.user_id)
+                    alert_queue.add_alert(self.user_id, {
+                        "keyword": "تنبيهاتي: تم حظرك من المجموعة", "group": chat_title, "sender": actor_name,
+                        "message": f"تم حظرك من {chat_title} بواسطة {actor_name}", "timestamp": time.strftime('%H:%M:%S'),
+                        "link": chat_link, "already_sent_tg": True
+                    })
                 else:
                     alert_text = (
                         "🔇 **تنبيهاتي | تم تقييدك من الكتابة!**\n"
@@ -2618,11 +2836,16 @@ class TelegramClientManager:
                         f"👤 **قام بالتقييد:** {actor_name}\n"
                         f"🔗 **رابط المجموعة:**\n{chat_link}"
                     )
-                    await self.send_to_saved_messages(alert_text)
+                    await self.send_to_saved_messages(alert_text, parse_mode='md')
                     socketio.emit('log_update', {"message": f"🔇 [تنبيهاتي] تم تقييدك من الكتابة في: {chat_title}"}, to=self.user_id)
                     socketio.emit('my_alert_event', {
                         "type": "mute", "group": chat_title, "actor": actor_name, "time": current_time, "link": chat_link
                     }, to=self.user_id)
+                    alert_queue.add_alert(self.user_id, {
+                        "keyword": "تنبيهاتي: تم تقييدك من الكتابة", "group": chat_title, "sender": actor_name,
+                        "message": f"تم تقييدك من الكتابة في {chat_title} بواسطة {actor_name}", "timestamp": time.strftime('%H:%M:%S'),
+                        "link": chat_link, "already_sent_tg": True
+                    })
 
             # 3. طرد إجباري
             elif isinstance(new_p, types.ChannelParticipantLeft):
@@ -2635,11 +2858,16 @@ class TelegramClientManager:
                         f"👤 **قام بالطرد:** {actor_name}\n"
                         f"🔗 **رابط المجموعة:**\n{chat_link}"
                     )
-                    await self.send_to_saved_messages(alert_text)
+                    await self.send_to_saved_messages(alert_text, parse_mode='md')
                     socketio.emit('log_update', {"message": f"🚨 [تنبيهاتي] تم طردك من: {chat_title}"}, to=self.user_id)
                     socketio.emit('my_alert_event', {
                         "type": "kick", "group": chat_title, "actor": actor_name, "time": current_time, "link": chat_link
                     }, to=self.user_id)
+                    alert_queue.add_alert(self.user_id, {
+                        "keyword": "تنبيهاتي: تم طردك من المجموعة", "group": chat_title, "sender": actor_name,
+                        "message": f"تم طردك من {chat_title} بواسطة {actor_name}", "timestamp": time.strftime('%H:%M:%S'),
+                        "link": chat_link, "already_sent_tg": True
+                    })
 
         except Exception as e:
             logger.error(f"Error handling channel participant update for {self.user_id}: {e}")
@@ -2700,11 +2928,16 @@ class TelegramClientManager:
                     f"👤 **الفاعل:** {actor_name}\n"
                     f"🔗 **رابط المجموعة:**\n{chat_link}"
                 )
-                await self.send_to_saved_messages(alert_text)
+                await self.send_to_saved_messages(alert_text, parse_mode='md')
                 socketio.emit('log_update', {"message": f"🚨 [تنبيهاتي] تم طردك/حظرك من: {chat_title}"}, to=self.user_id)
                 socketio.emit('my_alert_event', {
                     "type": "ban", "group": chat_title, "actor": actor_name, "time": current_time, "link": chat_link
                 }, to=self.user_id)
+                alert_queue.add_alert(self.user_id, {
+                    "keyword": "تنبيهاتي: تم طردك/حظرك من المجموعة", "group": chat_title, "sender": actor_name,
+                    "message": f"تم طردك/حظرك من {chat_title} بواسطة {actor_name}", "timestamp": time.strftime('%H:%M:%S'),
+                    "link": chat_link, "already_sent_tg": True
+                })
 
         except Exception as e:
             logger.error(f"Error handling chat action for {self.user_id}: {e}")
@@ -4937,7 +5170,31 @@ class TelegramManager:
                             client_manager.client.send_message(entity_obj, cleaned_message, parse_mode='md')
                         )
                     except Exception as _join_err:
+                        try:
+                            c_title = getattr(entity_obj, 'title', None) or str(entity)
+                            c_link = f"https://t.me/{getattr(entity_obj, 'username', '')}" if getattr(entity_obj, 'username', None) else "#"
+                            client_manager.run_coroutine(client_manager.trigger_action_alert(
+                                action_type="mute",
+                                chat_title=c_title,
+                                details_text=f"تم تقييد الحساب ومنعه من الإرسال في هذه المجموعة ({_join_err}).",
+                                direct_link=c_link
+                            ))
+                        except Exception:
+                            pass
                         raise Exception(f"لا يمكن الإرسال في {entity}: تتطلب الانضمام للمجموعة ({_join_err})")
+                elif "banned" in _err_str or "userbanned" in _err_str or "restricted" in _err_str:
+                    try:
+                        c_title = getattr(entity_obj, 'title', None) or str(entity)
+                        c_link = f"https://t.me/{getattr(entity_obj, 'username', '')}" if getattr(entity_obj, 'username', None) else "#"
+                        client_manager.run_coroutine(client_manager.trigger_action_alert(
+                            action_type="ban",
+                            chat_title=c_title,
+                            details_text=f"تم حظر الحساب تماماً من المجموعة ({_send_err}).",
+                            direct_link=c_link
+                        ))
+                    except Exception:
+                        pass
+                    raise _send_err
                 else:
                     raise _send_err
 

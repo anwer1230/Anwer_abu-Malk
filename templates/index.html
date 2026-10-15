@@ -5172,7 +5172,7 @@
         });
       }
 
-      // ── إشعار منبثق أنيق عند وصول رد على رسائلك ──
+      // ── إشعار منبثق أنيق لجميع تنبيهات الحساب (ردود، كابتشا، تحذيرات، حظر) ──
       function showMyAlertToast(alertData) {
         try {
           let container = document.getElementById('myAlertsToastContainer');
@@ -5186,31 +5186,69 @@
             container.style.maxWidth = '380px';
             document.body.appendChild(container);
           }
+          let headerClass = 'bg-warning text-dark';
+          let borderCol = '#f59e0b';
+          let titleText = 'رد جديد على رسالتك!';
+          let titleIcon = 'fas fa-reply-all';
+          if (alertData.is_test) {
+            titleText = 'اختبار نغمة التنبيه الصوتي 🔔';
+          } else if (alertData.type === 'captcha') {
+            headerClass = 'bg-info text-white';
+            borderCol = '#0dcaf0';
+            titleText = '🛡️ تنبيه تحقق وكابتشا عاجل!';
+            titleIcon = 'fas fa-shield-alt';
+          } else if (alertData.type === 'warning') {
+            headerClass = 'bg-danger text-white';
+            borderCol = '#dc3545';
+            titleText = '⚠️ تحذير أو تنبيه مخالفة!';
+            titleIcon = 'fas fa-exclamation-triangle';
+          } else if (alertData.type === 'ban') {
+            headerClass = 'bg-danger text-white';
+            borderCol = '#dc3545';
+            titleText = '🚨 تم حظرك من المجموعة!';
+            titleIcon = 'fas fa-ban';
+          } else if (alertData.type === 'mute') {
+            headerClass = 'bg-secondary text-white';
+            borderCol = '#6c757d';
+            titleText = '🔇 تم تقييدك من الكتابة!';
+            titleIcon = 'fas fa-volume-mute';
+          } else if (alertData.type === 'kick') {
+            headerClass = 'bg-danger text-white';
+            borderCol = '#dc3545';
+            titleText = '🚪 تم طردك من المجموعة!';
+            titleIcon = 'fas fa-door-open';
+          } else if (alertData.type === 'promotion') {
+            headerClass = 'bg-success text-white';
+            borderCol = '#198754';
+            titleText = '👑 تمت ترقيتك إلى مشرف!';
+            titleIcon = 'fas fa-crown';
+          }
+
           const toastEl = document.createElement('div');
-          toastEl.className = 'card border-warning shadow-lg mb-2 text-dark';
+          toastEl.className = 'card shadow-lg mb-2 text-dark';
           toastEl.style.borderRadius = '12px';
           toastEl.style.overflow = 'hidden';
-          toastEl.style.border = '2px solid #f59e0b';
+          toastEl.style.border = `2px solid ${borderCol}`;
           toastEl.innerHTML = `
-            <div class="card-header bg-warning text-dark py-2 px-3 d-flex justify-content-between align-items-center">
-              <span class="fw-bold small"><i class="fas fa-reply-all me-1"></i> ${alertData.is_test ? 'اختبار نغمة التنبيه الصوتي 🔔' : 'رد جديد على رسالتك!'}</span>
-              <button type="button" class="btn-close btn-close-dark btn-sm" onclick="this.closest('.card').remove()"></button>
+            <div class="card-header ${headerClass} py-2 px-3 d-flex justify-content-between align-items-center">
+              <span class="fw-bold small"><i class="${titleIcon} me-1"></i> ${titleText}</span>
+              <button type="button" class="btn-close ${headerClass.includes('text-white') ? 'btn-close-white' : 'btn-close-dark'} btn-sm" onclick="this.closest('.card').remove()"></button>
             </div>
             <div class="card-body p-3 bg-white">
-              <div class="small fw-bold text-primary mb-1"><i class="fas fa-user me-1"></i>${escapeHtml(alertData.sender || 'مستخدم')} في <strong>${escapeHtml(alertData.group || 'مجموعة')}</strong></div>
+              <div class="small fw-bold text-primary mb-1"><i class="fas fa-user me-1"></i>${escapeHtml(alertData.sender || alertData.actor || 'مستخدم')} في <strong>${escapeHtml(alertData.group || 'مجموعة')}</strong></div>
               <div class="small text-muted p-2 rounded bg-light border mb-2" style="max-height:80px; overflow:hidden;">${escapeHtml(alertData.text || '')}</div>
               <div class="d-flex justify-content-between align-items-center">
                 <small class="text-muted"><i class="far fa-clock me-1"></i>${escapeHtml(alertData.time || '')}</small>
-                ${alertData.link && alertData.link !== '#' ? `<a href="${escapeHtml(alertData.link)}" target="_blank" class="btn btn-sm btn-outline-warning text-dark fw-bold py-0 px-2" style="font-size:0.75rem;"><i class="fas fa-external-link-alt me-1"></i>فتح الرسالة</a>` : ''}
+                ${alertData.link && alertData.link !== '#' ? `<a href="${escapeHtml(alertData.link)}" target="_blank" class="btn btn-sm btn-outline-primary fw-bold py-0 px-2" style="font-size:0.75rem;"><i class="fas fa-external-link-alt me-1"></i>فتح الرسالة</a>` : ''}
               </div>
             </div>
           `;
           container.appendChild(toastEl);
-          setTimeout(() => { if (toastEl.parentNode) toastEl.remove(); }, 10000);
+          setTimeout(() => { if (toastEl.parentNode) toastEl.remove(); }, 12000);
         } catch(e){}
       }
 
-      // ── ربط أحداث تنبيهاتي مع Socket.IO ──
+      // ── ربط أحداث تنبيهاتي مع Socket.IO لكافة التنبيهات ──
       function initMyAlertsSocket() {
         if (!window.socket) {
           setTimeout(initMyAlertsSocket, 600);
@@ -5219,14 +5257,12 @@
         window.socket.off('my_alert_event');
         window.socket.on('my_alert_event', function(alertData) {
           if (!alertData) return;
-          if (alertData.type === 'reply') {
-            const soundEnabled = toggleMyAlertsReplySound ? toggleMyAlertsReplySound.checked : (alertData.sound_enabled !== false);
-            if (soundEnabled) {
-              const tone = selectMyAlertsReplyTone ? selectMyAlertsReplyTone.value : (alertData.sound_tone || 'chime');
-              playReplyAlertSound(tone);
-            }
-            showMyAlertToast(alertData);
+          const soundEnabled = toggleMyAlertsReplySound ? toggleMyAlertsReplySound.checked : (alertData.sound_enabled !== false);
+          if (soundEnabled) {
+            const tone = selectMyAlertsReplyTone ? selectMyAlertsReplyTone.value : (alertData.sound_tone || 'chime');
+            playReplyAlertSound(tone);
           }
+          showMyAlertToast(alertData);
         });
       }
       initMyAlertsSocket();
