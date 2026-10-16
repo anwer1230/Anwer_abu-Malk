@@ -924,6 +924,24 @@ def default_error_handler(e):
 USERS = {}
 USERS_LOCK = Lock()
 
+# تتبع مؤقتات حظر التدفق (FloodWait) لكل حساب لمنع العقوبات التراكمية
+USER_FLOOD_WAITS = {}
+USER_FLOOD_LOCK = Lock()
+
+def get_user_flood_wait(uid: str) -> float:
+    """إرجاع الثواني المتبقية من FloodWait لحساب معين (0 إن لم يكن هناك انتظار)"""
+    with USER_FLOOD_LOCK:
+        until = USER_FLOOD_WAITS.get(str(uid), 0)
+        remaining = until - time.time()
+        return max(0.0, remaining)
+
+def set_user_flood_wait(uid: str, seconds: float):
+    """تسجيل وقت حظر التدفق (FloodWait) للحساب لحمايته من أي طلبات لاحقة"""
+    with USER_FLOOD_LOCK:
+        USER_FLOOD_WAITS[str(uid)] = time.time() + float(seconds) + 5.0
+        logger.warning(f"⚠️ FloodWait recorded for user {uid}: {seconds:.0f}s (+5s safety)")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 🔑 سجل رموز التحقق — تتبع الأكواد المتزامنة مع الأجهزة والبريد
 # ═══════════════════════════════════════════════════════════════════
@@ -2050,6 +2068,103 @@ class TelegramClientManager:
                 logger.debug(f"Failed to get_me for {self.user_id}: {e}")
         return self.my_id
 
+    def _install_safety_wrapper(self):
+        """
+        طبقة حماية برمجية (Wrapper) حول طلبات الإرسال والانضمام في ملف الإدارة الرئيسية للتيليجرام:
+        تفحص حالة المجموعة بدقة قبل تنفيذ أي SendMessageRequest أو JoinChannelRequest؛
+        إذا كانت القناة تحتوي على `is_restricted` أو `can_send_messages=False`،
+        تقوم بوضع إشعار تحذيري في سجل النظام (Logs) وتخطي المحادثة تماماً.
+        """
+        if not self.client or getattr(self.client, '_safety_wrapper_installed', False):
+            return
+
+        original_send_message = self.client.send_message
+        original_call = self.client.__call__
+
+        async def wrapped_send_message(entity, *args, **kwargs):
+            if entity == 'me' or entity == 'self':
+                return await original_send_message(entity, *args, **kwargs)
+
+            # 1. فحص حالة التقييد is_restricted
+            is_restricted = bool(
+                getattr(entity, 'restricted', False) or
+                getattr(entity, 'is_restricted', False)
+            )
+
+            # 2. فحص صلاحية إرسال الرسائل can_send_messages
+            can_send_messages = True
+            is_broadcast = getattr(entity, 'broadcast', False)
+            is_admin = bool(getattr(entity, 'admin_rights', None) or getattr(entity, 'creator', False))
+
+            default_banned = getattr(entity, 'default_banned_rights', None)
+            if default_banned and getattr(default_banned, 'send_messages', False):
+                can_send_messages = False
+
+            user_banned = getattr(entity, 'banned_rights', None)
+            if user_banned and getattr(user_banned, 'send_messages', False):
+                can_send_messages = False
+
+            if is_broadcast and not is_admin:
+                can_send_messages = False
+
+            chat_title = getattr(entity, 'title', str(getattr(entity, 'id', entity)))
+
+            if is_restricted or not can_send_messages:
+                reason = "is_restricted=True (محادثة مقيدة من تيليجرام)" if is_restricted else "can_send_messages=False (ممنوع النشر للأعضاء أو قناة بث)"
+                warn_msg = f"⚠️ [Telegram Safety Wrapper] رصد قيود في المحادثة '{chat_title}': {reason} - تم تسجيل تحذير في سجل النظام وتخطي الإرسال تماماً."
+                logger.warning(warn_msg)
+                socketio.emit('log_update', {"message": f"🛡️ {warn_msg}"}, to=self.user_id)
+                return None
+
+            return await original_send_message(entity, *args, **kwargs)
+
+        async def wrapped_call(request, *args, **kwargs):
+            req_name = type(request).__name__
+            if req_name in ('JoinChannelRequest', 'ImportChatInviteRequest'):
+                target_entity = getattr(request, 'channel', None) or getattr(request, 'peer', None)
+                if target_entity:
+                    is_restricted = bool(
+                        getattr(target_entity, 'restricted', False) or
+                        getattr(target_entity, 'is_restricted', False)
+                    )
+                    is_broadcast = getattr(target_entity, 'broadcast', False)
+                    is_admin = bool(getattr(target_entity, 'admin_rights', None) or getattr(target_entity, 'creator', False))
+                    join_req = getattr(target_entity, 'join_request', False)
+
+                    can_send = True
+                    def_banned = getattr(target_entity, 'default_banned_rights', None)
+                    if def_banned and getattr(def_banned, 'send_messages', False):
+                        can_send = False
+                    if is_broadcast and not is_admin:
+                        can_send = False
+
+                    if is_restricted or not can_send or join_req:
+                        t_title = getattr(target_entity, 'title', str(getattr(target_entity, 'id', 'محادثة')))
+                        reason = "is_restricted=True" if is_restricted else ("can_send_messages=False" if not can_send else "join_request=True (تتطلب موافقة المشرف)")
+                        warn_msg = f"⚠️ [Telegram Safety Wrapper] تم تخطي {req_name} لـ '{t_title}': {reason} - تم تسجيل التحذير وإلغاء الطلب."
+                        logger.warning(warn_msg)
+                        socketio.emit('log_update', {"message": f"🛡️ {warn_msg}"}, to=self.user_id)
+                        return None
+
+            elif req_name == 'SendMessageRequest':
+                peer = getattr(request, 'peer', None)
+                if peer and peer != 'me':
+                    is_restricted = bool(getattr(peer, 'restricted', False) or getattr(peer, 'is_restricted', False))
+                    can_send = not bool(getattr(getattr(peer, 'default_banned_rights', None), 'send_messages', False))
+                    if is_restricted or not can_send:
+                        p_title = getattr(peer, 'title', str(getattr(peer, 'id', 'محادثة')))
+                        warn_msg = f"⚠️ [Telegram Safety Wrapper] تم تخطي SendMessageRequest لـ '{p_title}': is_restricted={is_restricted}, can_send_messages={can_send}."
+                        logger.warning(warn_msg)
+                        socketio.emit('log_update', {"message": f"🛡️ {warn_msg}"}, to=self.user_id)
+                        return None
+
+            return await original_call(request, *args, **kwargs)
+
+        self.client.send_message = wrapped_send_message
+        self.client.__call__ = wrapped_call
+        self.client._safety_wrapper_installed = True
+        logger.info(f"✅ Safety Wrapper installed on TelegramClient for user {self.user_id}")
+
     async def send_to_saved_messages(self, text, parse_mode='md'):
         """إرسال إشعار مباشرة إلى الرسائل المحفوظة (Saved Messages) مع حماية ضد أخطاء التنسيق"""
         try:
@@ -2070,12 +2185,23 @@ class TelegramClientManager:
         except Exception as e:
             logger.error(f"Failed to send to saved messages for {self.user_id}: {str(e)}")
             return False
+
     async def trigger_action_alert(self, action_type, chat_title, details_text, direct_link=None, actor_name="المشرف"):
         """
         إرسال تنبيه فوري لحساب تيليجرام عند الحظر أو التقييد أو الطرد أو التحذير أو الكابتشا،
         وتسجيله في السجل وإرساله فوراً إلى الرسائل المحفوظة.
         """
         try:
+            # فلترة حاسمة: منع إرسال تنبيهات تقييد وهمية لطلبات الانضمام أو الـ FloodWait أو قنوات البث
+            dt_lower = str(details_text or '').lower()
+            if any(x in dt_lower for x in [
+                'joinchannelrequest', 'inviterequestsent', 'successfully requested to join',
+                'floodwait', 'a wait of', 'seconds is required',
+                'the chat is restricted and cannot be used in that request'
+            ]):
+                logger.info(f"Skipping non-punitive action alert for {chat_title}: {details_text}")
+                return
+
             settings = load_settings(self.user_id)
             if not settings.get('my_alerts_enabled', True):
                 return
@@ -2331,6 +2457,7 @@ class TelegramClientManager:
             if API_ID and API_HASH:
                 saved_str = load_string_session(self.user_id)
                 self.client = TelegramClient(StringSession(saved_str or ''), int(API_ID), API_HASH)
+                self._install_safety_wrapper()
             else:
                 logger.error("API_ID or API_HASH not set")
                 return
@@ -2344,6 +2471,7 @@ class TelegramClientManager:
     async def _client_main(self):
         try:
             if self.client:
+                self._install_safety_wrapper()
                 await self.client.connect()
                 self.is_ready.set()
                 await self._ensure_my_info()
@@ -5056,6 +5184,49 @@ class TelegramManager:
 
         raise Exception(str(last_exc) if last_exc else f"لا يمكن الوصول إلى: {entity}")
 
+    def preflight_check_target(self, client_manager, entity_obj, entity_label):
+        """
+        فحص استباقي شامل وصارم لطبيعة المحادثة وصلاحيات الحساب قبل أي محاولة إرسال أو انضمام:
+        - هل الكيان قناة بث (Broadcast Channel) لا تسمح بنشر الأعضاء؟
+        - هل الحساب مطرود أو محظور تماماً من المجموعة؟
+        - هل المجموعة مقفلة للكتابة لجميع الأعضاء بواسطة المشرفين؟
+        - هل الحساب مقيد أو مكتوم فردياً داخل المجموعة؟
+        - هل الحساب غير منضم، وهل تتطلب المجموعة موافقة المشرف (Join Request)؟
+        
+        إرجاع: (can_send: bool, should_join: bool, reason: str, details: dict)
+        """
+        is_broadcast = getattr(entity_obj, 'broadcast', False)
+        is_admin = bool(getattr(entity_obj, 'admin_rights', None) or getattr(entity_obj, 'creator', False))
+        is_left = getattr(entity_obj, 'left', False)
+        join_request = getattr(entity_obj, 'join_request', False)
+
+        # 1. قنوات البث (Broadcast Channels)
+        if is_broadcast and not is_admin:
+            return False, False, "قناة للبث والمشرفين فقط (لا يمكن للأعضاء النشر فيها)", {"type": "broadcast"}
+
+        # 2. التحقق من الحظر أو الطرد الكامل
+        if type(entity_obj).__name__ in ('ChatForbidden', 'ChannelForbidden') or getattr(entity_obj, 'kicked', False):
+            return False, False, "الحساب محظور أو مطرود تماماً من هذه المحادثة", {"type": "banned"}
+
+        # 3. التحقق من قيود المجموعة العامة (default_banned_rights)
+        default_banned = getattr(entity_obj, 'default_banned_rights', None)
+        if default_banned and getattr(default_banned, 'send_messages', False):
+            return False, False, "المجموعة مقفلة للكتابة لجميع الأعضاء بواسطة المشرفين", {"type": "chat_locked"}
+
+        # 4. التحقق من قيود الحساب الفردية (banned_rights)
+        user_banned = getattr(entity_obj, 'banned_rights', None)
+        if user_banned and getattr(user_banned, 'send_messages', False):
+            return False, False, "الحساب مقيد ومكتوم داخل هذه المجموعة بواسطة الإدارة", {"type": "user_muted"}
+
+        # 5. التحقق من العضوية وطلبات الانضمام المعلقة
+        if is_left and not is_admin:
+            if join_request:
+                return False, False, "المجموعة تتطلب موافقة يدوية من المشرفين للانضمام (طلب انضمام معلق)", {"type": "join_request"}
+            else:
+                return True, True, None, {"type": "needs_join"}
+
+        return True, False, None, {"type": "ready"}
+
     def send_message_async(self, user_id, entity, message, forced_action=None, wait_for_completion=False, cancel_event=None):
         """
         إرسال رسالة مع دعم الإجراء المختار مسبقاً من نافذة الفحص الاستباقي.
@@ -5081,7 +5252,26 @@ class TelegramManager:
             except Exception as auth_error:
                 raise Exception(f"خطأ في التحقق من التصريح: {str(auth_error)}")
 
+            # فحص هل الحساب تحت مهلة FloodWait حالية
+            fw_rem = get_user_flood_wait(user_id)
+            if fw_rem > 0:
+                fw_msg = f"⏳ تخطي الإرسال لـ {entity}: الحساب تحت مهلة انتظار FloodWait متبقي منها {fw_rem:.0f} ثانية"
+                logger.warning(fw_msg)
+                socketio.emit('log_update', {"message": fw_msg}, to=user_id)
+                return {"success": False, "skipped": True, "flood_wait": fw_rem, "message": fw_msg}
+
             entity_obj = self._resolve_entity(client_manager, entity)
+
+            # ── 0. الفحص الاستباقي الشامل لطبيعة المحادثة وصلاحيات الحساب ──
+            can_send, should_join, pre_reason, pre_details = self.preflight_check_target(
+                client_manager, entity_obj, entity
+            )
+            if not can_send:
+                logger.info(f"⏭️ تخطي استباقي لـ {entity}: {pre_reason}")
+                socketio.emit('log_update', {
+                    "message": f"⏭️ تم تخطي {entity}: {pre_reason}"
+                }, to=user_id)
+                return {"success": False, "skipped": True, "message": f"تم تخطي {entity}: {pre_reason}"}
 
             # ── 1. جلب التقرير من قاعدة البيانات الخارجية (Firestore) أو فحصه وحفظه إن كانت جديدة ──
             report, is_new = self.get_or_create_group_safety_report(
@@ -5155,34 +5345,83 @@ class TelegramManager:
                 result = client_manager.run_coroutine(
                     client_manager.client.send_message(entity_obj, cleaned_message, parse_mode='md')
                 )
+            except FloodWaitError as fwe:
+                set_user_flood_wait(user_id, fwe.seconds)
+                fw_msg = f"⏳ تيليجرام يطلب الانتظار {fwe.seconds} ثانية (FloodWait) - تم تسجيل الحظر المؤقت وتخطي الإرسال لـ {entity}"
+                logger.warning(fw_msg)
+                socketio.emit('log_update', {"message": fw_msg}, to=user_id)
+                return {"success": False, "skipped": True, "flood_wait": fwe.seconds, "message": fw_msg}
             except Exception as _send_err:
                 _err_str = str(_send_err).lower()
+
+                # إذا كانت القناة مقيدة من تيليجرام
+                if "restricted" in _err_str or "not be used in that request" in _err_str:
+                    logger.warning(f"Chat restricted for send in {entity}: {_send_err}")
+                    return {"success": False, "skipped": True, "message": f"تم تخطي {entity}: المحادثة مقيدة من تيليجرام ولا تسمح بالإرسال"}
+
                 # إذا تطلب الإرسال الانضمام للمجموعة أولاً
                 if "write" in _err_str or "forbidden" in _err_str or "not a member" in _err_str or "participant" in _err_str:
+                    # فحص هل الحساب في فترة FloodWait حالية
+                    fw_rem = get_user_flood_wait(user_id)
+                    if fw_rem > 0:
+                        fw_skip = f"تخطي الانضمام لـ {entity}: الحساب تحت مهلة FloodWait متبقي منها {fw_rem:.0f} ثانية"
+                        logger.warning(fw_skip)
+                        socketio.emit('log_update', {"message": f"⏳ {fw_skip}"}, to=user_id)
+                        return {"success": False, "skipped": True, "message": fw_skip}
+
+                    # منع محاولة الانضمام إذا كانت قناة بث
+                    if getattr(entity_obj, 'broadcast', False):
+                        return {"success": False, "skipped": True, "message": f"تم تخطي {entity}: قناة للبث والمشرفين فقط"}
+
                     try:
                         logger.info(f"Auto-joining {entity} before sending message...")
                         from telethon.tl.functions.channels import JoinChannelRequest
                         client_manager.run_coroutine(
                             client_manager.client(JoinChannelRequest(entity_obj))
                         )
-                        time.sleep(1)
+                        time.sleep(2)
                         result = client_manager.run_coroutine(
                             client_manager.client.send_message(entity_obj, cleaned_message, parse_mode='md')
                         )
+                    except FloodWaitError as fwe:
+                        set_user_flood_wait(user_id, fwe.seconds)
+                        fw_join = f"⏳ تيليجرام فرض حظر انضمام (FloodWait {fwe.seconds} ثانية) لـ {entity} - تم إيقاف الانضمام تلقائياً"
+                        logger.warning(fw_join)
+                        socketio.emit('log_update', {"message": fw_join}, to=user_id)
+                        return {"success": False, "skipped": True, "flood_wait": fwe.seconds, "message": fw_join}
+                    except InviteRequestSentError:
+                        req_msg = f"📩 تم إرسال طلب انضمام لـ {entity} بنجاح وبانتظار موافقة المشرفين"
+                        logger.info(req_msg)
+                        socketio.emit('log_update', {"message": req_msg}, to=user_id)
+                        return {"success": False, "skipped": True, "message": req_msg}
                     except Exception as _join_err:
-                        try:
-                            c_title = getattr(entity_obj, 'title', None) or str(entity)
-                            c_link = f"https://t.me/{getattr(entity_obj, 'username', '')}" if getattr(entity_obj, 'username', None) else "#"
-                            client_manager.run_coroutine(client_manager.trigger_action_alert(
-                                action_type="mute",
-                                chat_title=c_title,
-                                details_text=f"تم تقييد الحساب ومنعه من الإرسال في هذه المجموعة ({_join_err}).",
-                                direct_link=c_link
-                            ))
-                        except Exception:
-                            pass
-                        raise Exception(f"لا يمكن الإرسال في {entity}: تتطلب الانضمام للمجموعة ({_join_err})")
-                elif "banned" in _err_str or "userbanned" in _err_str or "restricted" in _err_str:
+                        _je_str = str(_join_err).lower()
+                        if "requested to join" in _je_str or "inviterequestsent" in _je_str:
+                            req_msg = f"📩 تم إرسال طلب انضمام لـ {entity} وبانتظار موافقة المشرفين"
+                            socketio.emit('log_update', {"message": req_msg}, to=user_id)
+                            return {"success": False, "skipped": True, "message": req_msg}
+                        if "wait of" in _je_str or "flood" in _je_str:
+                            import re as _re_f
+                            m_sec = _re_f.search(r'(\d+)\s*second', _je_str)
+                            sec_val = float(m_sec.group(1)) if m_sec else 120.0
+                            set_user_flood_wait(user_id, sec_val)
+                            return {"success": False, "skipped": True, "message": f"تخطي {entity}: الحساب تحت مهلة انتظار ({sec_val:.0f}s)"}
+
+                        # فقط إذا كان حظر/كتم حقيقي داخل المجموعة
+                        if "banned" in _je_str or "restricted" in _je_str:
+                            try:
+                                c_title = getattr(entity_obj, 'title', None) or str(entity)
+                                c_link = f"https://t.me/{getattr(entity_obj, 'username', '')}" if getattr(entity_obj, 'username', None) else "#"
+                                client_manager.run_coroutine(client_manager.trigger_action_alert(
+                                    action_type="mute",
+                                    chat_title=c_title,
+                                    details_text=f"تم تقييد الحساب ومنعه من الإرسال في هذه المجموعة ({_join_err}).",
+                                    direct_link=c_link
+                                ))
+                            except Exception:
+                                pass
+                        return {"success": False, "skipped": True, "message": f"تعذر الانضمام لـ {entity}: {_join_err}"}
+                elif "banned" in _err_str or "userbanned" in _err_str:
                     try:
                         c_title = getattr(entity_obj, 'title', None) or str(entity)
                         c_link = f"https://t.me/{getattr(entity_obj, 'username', '')}" if getattr(entity_obj, 'username', None) else "#"
@@ -5194,9 +5433,9 @@ class TelegramManager:
                         ))
                     except Exception:
                         pass
-                    raise _send_err
+                    return {"success": False, "skipped": True, "message": f"تم تخطي {entity}: الحساب محظور من المجموعة"}
                 else:
-                    raise _send_err
+                    return {"success": False, "skipped": True, "message": f"فشل الإرسال لـ {entity}: {_send_err}"}
 
             return {"success": True, "message_id": result.id}
 
@@ -8702,6 +8941,20 @@ def api_send_now():
                     curr_message = message
                     curr_images = image_files
 
+                    # ── فحص FloodWait قبل بدء معالجة المجموعة ──
+                    fw_rem = get_user_flood_wait(user_id)
+                    if fw_rem > 0:
+                        if fw_rem > 180:
+                            stop_fw = f"🛑 تم إيقاف الإرسال الجماعي مؤقتاً لحماية الحساب من عقوبات تيليجرام (FloodWait: {fw_rem:.0f}s)"
+                            logger.warning(stop_fw)
+                            socketio.emit('log_update', {"message": stop_fw}, to=user_id)
+                            break
+                        else:
+                            socketio.emit('log_update', {
+                                "message": f"⏳ [{i}/{len(groups_list)}] انتظار مهلة FloodWait ({fw_rem:.0f} ثانية) قبل معالجة {group}..."
+                            }, to=user_id)
+                            time.sleep(fw_rem + 2)
+
                     # 1. جلب عميل المستخدم وحل المجموعة
                     with USERS_LOCK:
                         cm = USERS.get(user_id, {}).get('client_manager')
@@ -8709,6 +8962,26 @@ def api_send_now():
                         raise Exception("العميل غير متصل - يرجى تسجيل الدخول للحساب")
 
                     entity_obj = telegram_manager._resolve_entity(cm, group)
+
+                    # ── الفحص الاستباقي الصارم قبل أي انضمام أو إرسال ──
+                    can_send, should_join, pre_reason, pre_details = telegram_manager.preflight_check_target(
+                        cm, entity_obj, group
+                    )
+                    if not can_send:
+                        skip_msg = f"⏭️ [{i}/{len(groups_list)}] تم التخطي استباقياً: {pre_reason} ({group})"
+                        logger.info(skip_msg)
+                        socketio.emit('log_update', {"message": skip_msg}, to=user_id)
+                        socketio.emit('send_progress', {
+                            "group": group,
+                            "index": i,
+                            "total": len(groups_list),
+                            "status": "skipped",
+                            "reason": pre_reason,
+                            "emoji": "⏭️",
+                            "message": skip_msg
+                        }, to=user_id)
+                        skipped_count += 1
+                        continue
 
                     # ── 2. فحص العضوية المسبق والانضمام التلقائي المنظم (P1) ──
                     is_member = False
@@ -8719,7 +8992,24 @@ def api_send_now():
                         is_member = False
 
                     join_success = False
-                    if not is_member:
+                    if not is_member and should_join:
+                        fw_rem = get_user_flood_wait(user_id)
+                        if fw_rem > 0:
+                            skip_msg = f"⏳ [{i}/{len(groups_list)}] تم تخطي الانضمام لـ {group}: الحساب تحت مهلة FloodWait ({fw_rem:.0f}s)"
+                            logger.warning(skip_msg)
+                            socketio.emit('log_update', {"message": skip_msg}, to=user_id)
+                            socketio.emit('send_progress', {
+                                "group": group,
+                                "index": i,
+                                "total": len(groups_list),
+                                "status": "skipped",
+                                "reason": "تحت مهلة FloodWait",
+                                "emoji": "⏳",
+                                "message": skip_msg
+                            }, to=user_id)
+                            skipped_count += 1
+                            continue
+
                         socketio.emit('log_update', {
                             "message": f"🔗 [{i}/{len(groups_list)}] الحساب ليس عضواً في {group} — جاري الانضمام التلقائي المنظم..."
                         }, to=user_id)
@@ -8792,35 +9082,18 @@ def api_send_now():
                             skipped_count += 1
                             continue
                         except FloodWaitError as fwe:
+                            set_user_flood_wait(user_id, fwe.seconds)
                             wait_secs = fwe.seconds + random.uniform(3, 8)
-                            logger.warning(f"⚠️ FloodWait أثناء الانضمام لـ {group}: انتظار {wait_secs:.0f} ثانية")
+                            logger.warning(f"⚠️ FloodWait أثناء الانضمام لـ {group}: تسجيل مهلة انتظار {wait_secs:.0f} ثانية")
                             socketio.emit('log_update', {
-                                "message": f"⏳ [{i}/{len(groups_list)}] قيد FloodWait أثناء الانضمام لـ {group}: انتظار {wait_secs:.0f}ث..."
+                                "message": f"⏳ [{i}/{len(groups_list)}] قيد FloodWait أثناء الانضمام لـ {group}: {fwe.seconds}ث - تم إيقاف الانضمام مؤقتاً"
                             }, to=user_id)
-                            time.sleep(wait_secs)
-                            try:
-                                if m_invite:
-                                    cm.run_coroutine(cm.client(ImportChatInviteRequest(m_invite.group(1))))
-                                else:
-                                    cm.run_coroutine(cm.client(JoinChannelRequest(entity_obj)))
-                                join_success = True
-                                is_member = True
-                                time.sleep(2)
-                            except Exception as fwe_retry:
-                                fail_msg = f"❌ [{i}/{len(groups_list)}] فشل الانضمام لـ {group} بعد انتظار FloodWait: {fwe_retry}"
-                                logger.error(fail_msg)
-                                socketio.emit('log_update', {"message": fail_msg}, to=user_id)
-                                socketio.emit('send_progress', {
-                                    "group": group,
-                                    "index": i,
-                                    "total": len(groups_list),
-                                    "status": "error",
-                                    "reason": f"فشل: FloodWait ({fwe.seconds}s)",
-                                    "emoji": "❌",
-                                    "message": fail_msg
-                                }, to=user_id)
-                                failed += 1
-                                continue
+                            if fwe.seconds > 180:
+                                stop_msg = f"🛑 إيقاف الإرسال مؤقتاً: تيليجرام طلب انتظار {fwe.seconds} ثانية (FloodWait)"
+                                socketio.emit('log_update', {"message": stop_msg}, to=user_id)
+                                break
+                            skipped_count += 1
+                            continue
                         except Exception as join_err:
                             err_str = str(join_err)
                             reason = "تم التخطي: الحساب وصل للحد الأقصى (500 مجموعة)" if ("too much" in err_str.lower() or "500" in err_str) else f"تعذر الانضمام ({err_str[:60]})"
@@ -8914,10 +9187,11 @@ def api_send_now():
                                 )
                             else:
                                 result = telegram_manager.send_message_async(
-                                    user_id, group, curr_message, forced_action='send'
+                                    user_id, group, curr_message, forced_action=action_to_use
                                 )
                             break
                         except FloodWaitError as fwe:
+                            set_user_flood_wait(user_id, fwe.seconds)
                             if send_attempts < max_send_attempts:
                                 wait_s = fwe.seconds + random.uniform(3, 8)
                                 logger.warning(f"⚠️ FloodWait: انتظار {wait_s:.0f}s قبل إعادة محاولة الإرسال لـ {group}")

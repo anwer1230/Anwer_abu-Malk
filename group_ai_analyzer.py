@@ -28,7 +28,7 @@ GEMINI_MODELS = [
 
 async def fetch_group_recent_messages(client, entity_obj, limit=50):
     """
-    استخراج آخر 50 رسالة من المجموعة مع فحص القيود وبوتات الإشراف
+    استخراج آخر 50 رسالة من المجموعة مع فحص القيود وبوتات الإشراف والتحقق المسبق من طبيعة المحادثة
     """
     messages_data = []
     group_title = getattr(entity_obj, 'title', str(getattr(entity_obj, 'id', 'مجموعة')))
@@ -43,7 +43,42 @@ async def fetch_group_recent_messages(client, entity_obj, limit=50):
         "slowmode_seconds": slowmode_seconds
     }
 
-    # فحص صلاحيات المجموعة الافتراضية
+    # 1. التحقق المسبق: هل المحادثة قناة بث (Broadcast Channel) وليست مجموعة تفاعلية؟
+    is_broadcast = getattr(entity_obj, 'broadcast', False)
+    is_admin = bool(getattr(entity_obj, 'admin_rights', None) or getattr(entity_obj, 'creator', False))
+    if is_broadcast and not is_admin:
+        permissions["can_send_messages"] = False
+        return {
+            "group_id": group_id,
+            "group_title": group_title,
+            "username": username,
+            "permissions": permissions,
+            "messages_count": 0,
+            "messages": [],
+            "accessible": False,
+            "is_broadcast": True,
+            "error": "قناة للبث والمشرفين فقط (ممنوع نشر الأعضاء)"
+        }
+
+    # 2. التحقق المسبق: هل الحساب غير منضم للمجموعة أو يتطلب موافقة المشرف؟
+    is_left = getattr(entity_obj, 'left', False)
+    join_request = getattr(entity_obj, 'join_request', False)
+    if is_left and not is_admin:
+        permissions["can_send_messages"] = False
+        return {
+            "group_id": group_id,
+            "group_title": group_title,
+            "username": username,
+            "permissions": permissions,
+            "messages_count": 0,
+            "messages": [],
+            "accessible": False,
+            "is_left": True,
+            "join_request": join_request,
+            "error": "الانضمام يتطلب موافقة يدوية من المشرفين (Join Request)" if join_request else "الحساب غير منضم لهذه المحادثة"
+        }
+
+    # 3. فحص صلاحيات المجموعة الافتراضية وصلاحيات الحساب الفردية
     try:
         banned_rights = getattr(entity_obj, 'default_banned_rights', None)
         if banned_rights:
@@ -53,8 +88,35 @@ async def fetch_group_recent_messages(client, entity_obj, limit=50):
                 permissions["can_send_media"] = False
             if getattr(banned_rights, 'embed_links', False):
                 permissions["can_embed_links"] = False
+
+        user_banned = getattr(entity_obj, 'banned_rights', None)
+        if user_banned and getattr(user_banned, 'send_messages', False):
+            permissions["can_send_messages"] = False
+            return {
+                "group_id": group_id,
+                "group_title": group_title,
+                "username": username,
+                "permissions": permissions,
+                "messages_count": 0,
+                "messages": [],
+                "accessible": False,
+                "is_banned": True,
+                "error": "الحساب مقيد ومكتوم داخل هذه المجموعة بواسطة الإدارة"
+            }
     except Exception as e:
-        logger.debug(f"Error checking default_banned_rights: {e}")
+        logger.debug(f"Error checking banned_rights: {e}")
+
+    if not permissions["can_send_messages"]:
+        return {
+            "group_id": group_id,
+            "group_title": group_title,
+            "username": username,
+            "permissions": permissions,
+            "messages_count": 0,
+            "messages": [],
+            "accessible": False,
+            "error": "المجموعة مقفلة تماماً وتمنع إرسال الرسائل لجميع الأعضاء"
+        }
 
     try:
         async for msg in client.iter_messages(entity_obj, limit=limit):
@@ -90,7 +152,19 @@ async def fetch_group_recent_messages(client, entity_obj, limit=50):
                 "has_media": bool(getattr(msg, 'media', None))
             })
     except Exception as e:
-        logger.warning(f"Error fetching messages for group {group_title}: {e}")
+        err_msg = str(e)
+        logger.warning(f"Error fetching messages for group {group_title}: {err_msg}")
+        permissions["can_send_messages"] = False
+        return {
+            "group_id": group_id,
+            "group_title": group_title,
+            "username": username,
+            "permissions": permissions,
+            "messages_count": 0,
+            "messages": [],
+            "accessible": False,
+            "error": f"تعذر قراءة رسائل المحادثة ({err_msg})"
+        }
 
     return {
         "group_id": group_id,
@@ -98,12 +172,31 @@ async def fetch_group_recent_messages(client, entity_obj, limit=50):
         "username": username,
         "permissions": permissions,
         "messages_count": len(messages_data),
-        "messages": messages_data
+        "messages": messages_data,
+        "accessible": True
     }
 
 
 def _heuristic_analysis(group_data):
     """تحليل بديل فوري ودقيق في حال عدم توفر أو تأخر واجهة الذكاء الاصطناعي"""
+    perms = group_data.get("permissions", {})
+
+    # إذا كانت المجموعة غير متاحة أو مقفلة أو الحساب غير منضم
+    if not group_data.get("accessible", True) or not perms.get("can_send_messages", True):
+        err_msg = group_data.get("error") or "المجموعة مقفلة تماماً وتمنع إرسال الرسائل للأعضاء"
+        return {
+            "has_recent_punishments": True,
+            "punished_count": 1,
+            "details_of_punishments": [err_msg],
+            "causes": [err_msg],
+            "mistakes_by_others": ["محاولة الإرسال في قناة بث أو مجموعة مقيدة/غير منضم لها"],
+            "prohibited_actions": ["skip_group"],
+            "keywords_to_avoid": [],
+            "risk_assessment": "critical",
+            "summary_ar": f"⛔ تخطي فوري: {err_msg}",
+            "recommended_action": "تخطي المحادثة تلقائياً لحماية الحساب من الحظر والتقييد."
+        }
+
     messages = group_data.get("messages", [])
     punishments = []
     causes = []
@@ -146,12 +239,7 @@ def _heuristic_analysis(group_data):
                 prohibited.add("no_forwards")
                 mistakes.append("إرسال رسائل محولة مسبقاً")
 
-    perms = group_data.get("permissions", {})
-    if not perms.get("can_send_messages", True):
-        risk = "critical"
-        causes.append("المجموعة مقفلة تماماً وتمنع إرسال الرسائل للأعضاء")
-        prohibited.add("skip_group")
-    elif not perms.get("can_embed_links", True):
+    if not perms.get("can_embed_links", True):
         prohibited.add("no_links")
         causes.append("المجموعة معطل بها ميزة تضمين الروابط")
 
@@ -176,6 +264,9 @@ def analyze_group_conversations_with_ai(group_data):
     """
     تحليل محادثات المجموعة بواسطة Gemini مع fallback للتحليل الذاتي
     """
+    if not group_data.get("accessible", True) or not group_data.get("permissions", {}).get("can_send_messages", True):
+        return _heuristic_analysis(group_data)
+
     messages = group_data.get("messages", [])
     if not messages:
         return _heuristic_analysis(group_data)
