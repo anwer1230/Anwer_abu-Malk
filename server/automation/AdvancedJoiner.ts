@@ -90,7 +90,7 @@ export class AdvancedJoiner {
     client: TelegramClient,
     userId: string,
     rawInput: string,
-    delaySeconds = 15,
+    delaySeconds = 300,
     onProgress?: (state: JoinSessionState) => void
   ) {
     // If already running, return current state

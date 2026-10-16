@@ -208,7 +208,7 @@ export function createAutomationRouter(
         return res.status(401).json({ ok: false, error: 'Telegram client not authenticated' });
       }
 
-      const { rawInput, delaySeconds = 15 } = req.body;
+      const { rawInput, delaySeconds = 300 } = req.body;
       const state = await AdvancedJoiner.startJoining(
         client,
         userId,

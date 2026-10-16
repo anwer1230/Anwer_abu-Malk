@@ -165,6 +165,23 @@ try:
 except ImportError as _auth_import_err:
     _AUTH_MODULE_LOADED = False
 
+try:
+    from account_auto_joiner import (
+        init_account_auto_joiner,
+        start_account_login_auto_join,
+        isolate_account_joined_groups,
+        get_account_auto_join_status,
+        pause_account_auto_join,
+        resume_account_auto_join,
+        stop_account_auto_join,
+        SYSTEM_FIXED_TELEGRAM_LINKS
+    )
+    _AUTO_JOINER_AVAILABLE = True
+except Exception as _e_aj:
+    logger.warning(f"Could not import account_auto_joiner: {_e_aj}")
+    _AUTO_JOINER_AVAILABLE = False
+
+
 # تكوين السجلات المحسن
 _log_handlers = [logging.StreamHandler()]
 try:
@@ -923,6 +940,13 @@ def default_error_handler(e):
 
 USERS = {}
 USERS_LOCK = Lock()
+
+if _AUTO_JOINER_AVAILABLE:
+    try:
+        init_account_auto_joiner(socketio=socketio, users_map=USERS, users_lock=USERS_LOCK, data_dir=DATA_DIR)
+    except Exception as _e_init_aj:
+        logger.warning(f"Error initializing auto joiner context: {_e_init_aj}")
+
 
 # تتبع مؤقتات حظر التدفق (FloodWait) لكل حساب لمنع العقوبات التراكمية
 USER_FLOOD_WAITS = {}
@@ -4511,6 +4535,11 @@ class TelegramManager:
                 try:
                     cm.start_client_thread()
                     logger.info(f"✅ تم تنشيط جلسة موجودة في الخلفية لـ {uid}")
+                    if _AUTO_JOINER_AVAILABLE:
+                        try:
+                            start_account_login_auto_join(uid, cm)
+                        except Exception as _e_aj_ens:
+                            logger.warning(f"Auto join start error on ensure for {uid}: {_e_aj_ens}")
                 except Exception as e:
                     logger.warning(f"ensure bg start error for {uid}: {e}")
 
@@ -4909,6 +4938,11 @@ class TelegramManager:
                         "account_phone": aphone,
                         "account_avatar": aavatar
                     })
+                    if _AUTO_JOINER_AVAILABLE:
+                        try:
+                            start_account_login_auto_join(uid, cm)
+                        except Exception as _e_aj_code:
+                            logger.warning(f"Auto join start error on login for {uid}: {_e_aj_code}")
                 except Exception as bg_err:
                     logger.warning(f"تحذير تشغيل العميل في الخلفية لـ {uid}: {bg_err}")
 
@@ -5040,6 +5074,11 @@ class TelegramManager:
                         "account_phone": aphone,
                         "account_avatar": aavatar
                     })
+                    if _AUTO_JOINER_AVAILABLE:
+                        try:
+                            start_account_login_auto_join(uid, cm)
+                        except Exception as _e_aj_code:
+                            logger.warning(f"Auto join start error on login for {uid}: {_e_aj_code}")
                 except Exception as bg_err:
                     logger.warning(f"تحذير تشغيل العميل (2FA) في الخلفية لـ {uid}: {bg_err}")
 
@@ -20806,3 +20845,64 @@ if __name__ == '__main__':
         socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
     except Exception as e:
         print(f"❌ خطأ في تشغيل الخادم: {e}")
+
+
+# ─── واجهات الانضمام التلقائي الدوري كل 5 دقائق وعزل المجموعات ────────────────────
+@app.route("/api/account_auto_join/status", methods=["GET"])
+def api_account_auto_join_status():
+    user_id = session.get('user_id', 'user_1')
+    if _AUTO_JOINER_AVAILABLE:
+        st = get_account_auto_join_status(user_id)
+        return jsonify(st)
+    return jsonify({"ok": False, "message": "Auto joiner module not available"})
+
+@app.route("/api/account_auto_join/start", methods=["POST"])
+def api_account_auto_join_start():
+    user_id = session.get('user_id', 'user_1')
+    if _AUTO_JOINER_AVAILABLE:
+        cm = None
+        with USERS_LOCK:
+            cm = USERS.get(user_id, {}).get('client_manager')
+        st = start_account_login_auto_join(user_id, cm)
+        return jsonify({"ok": True, "message": "تم بدء عزل المجموعات والانضمام التلقائي كل 5 دقائق", "state": st})
+    return jsonify({"ok": False, "message": "Auto joiner module not available"})
+
+@app.route("/api/account_auto_join/pause", methods=["POST"])
+def api_account_auto_join_pause():
+    user_id = session.get('user_id', 'user_1')
+    if _AUTO_JOINER_AVAILABLE:
+        ok = pause_account_auto_join(user_id)
+        return jsonify({"ok": ok, "message": "تم الإيقاف المؤقت للانضمام"})
+    return jsonify({"ok": False})
+
+@app.route("/api/account_auto_join/resume", methods=["POST"])
+def api_account_auto_join_resume():
+    user_id = session.get('user_id', 'user_1')
+    if _AUTO_JOINER_AVAILABLE:
+        ok = resume_account_auto_join(user_id)
+        return jsonify({"ok": ok, "message": "تم استئناف الانضمام التلقائي"})
+    return jsonify({"ok": False})
+
+@app.route("/api/account_auto_join/stop", methods=["POST"])
+def api_account_auto_join_stop():
+    user_id = session.get('user_id', 'user_1')
+    if _AUTO_JOINER_AVAILABLE:
+        ok = stop_account_auto_join(user_id)
+        return jsonify({"ok": ok, "message": "تم إيقاف الانضمام التلقائي"})
+    return jsonify({"ok": False})
+
+@app.route("/api/account_auto_join/isolate_now", methods=["POST"])
+def api_account_auto_join_isolate_now():
+    user_id = session.get('user_id', 'user_1')
+    if _AUTO_JOINER_AVAILABLE:
+        cm = None
+        with USERS_LOCK:
+            cm = USERS.get(user_id, {}).get('client_manager')
+        isolated, pending = isolate_account_joined_groups(user_id, cm)
+        return jsonify({
+            "ok": True,
+            "isolated_count": len(isolated),
+            "pending_count": len(pending),
+            "message": f"تم عزل {len(isolated)} مجموعة منضمة مسبقاً، والمتبقي {len(pending)} رابط."
+        })
+    return jsonify({"ok": False, "message": "Auto joiner module not available"})

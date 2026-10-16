@@ -18,6 +18,22 @@ export class StorageManager {
     return userDir;
   }
 
+    public static loadDefaultFixedLinks(): string[] {
+    try {
+      const savedPath = path.join(process.cwd(), 'data', 'saved_links.json');
+      if (fs.existsSync(savedPath)) {
+        const raw = fs.readFileSync(savedPath, 'utf-8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.links)) {
+          return data.links.map((l: any) => l.url).filter(Boolean);
+        }
+      }
+    } catch {
+      // fallback
+    }
+    return [];
+  }
+
   public static getDefaultConfig(userId: string): AutomationConfig {
     return {
       userId,
@@ -32,7 +48,7 @@ export class StorageManager {
       sendToAllGroups: false,
       sequentialMessages: [],
       keywords: [],
-      advancedJoinLinks: [],
+      advancedJoinLinks: StorageManager.loadDefaultFixedLinks(),
       isMonitoring: false,
       isDispatching: false,
       lastDispatchedAt: 0,
